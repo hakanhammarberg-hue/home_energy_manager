@@ -1,0 +1,625 @@
+From 79ccb14823f3b886bda321a1bc40b28764cdf3e9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 14:13:20 +0000
+Subject: [PATCH] Fas 4b: Nibe watchdog, settings panel, fuse-current cap
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Watchdog timer forces the heat-offset register back to neutral after
+  15 minutes with no confirmed pump contact while governor headroom is
+  unknown, closing the "no fail-safe on disconnect" gap noted in
+  controller.py. New status "watchdog_reset" surfaces this on the
+  dashboard status card.
+- New Nibe F750 settings card on Settings > System: enable heating
+  boost, Lyxläge varmvatten, cheap-hour percentile, and minimum solar
+  surplus to boost on — mirrors the EV scheduler's card/state/save
+  pattern.
+- Fuse Current is now capped at 200A on both the settings form and the
+  PATCH /api/settings backend validation, closing the root cause of the
+  earlier incident where a voltage (220) was saved as an amperage.
+
+19/19 backend unit tests pass; frontend type-check and lint clean.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ home_energy_manager/backend/api.py            | 56 ++++++++++++
+ home_energy_manager/backend/app.py            | 24 +++++-
+ home_energy_manager/config.yaml               |  2 +-
+ home_energy_manager/core/nibe/controller.py   | 43 +++++++++-
+ home_energy_manager/core/nibe/decision.py     | 56 ++++++++++--
+ .../core/nibe/tests/test_decision.py          | 86 +++++++++++++++++++
+ .../src/components/NibeStatusCard.tsx         |  2 +
+ .../components/settings/HomeFormSection.tsx   |  2 +-
+ .../frontend/src/hooks/useNibeStatus.ts       |  1 +
+ .../frontend/src/pages/SettingsPage.tsx       | 58 ++++++++++++-
+ 10 files changed, 314 insertions(+), 16 deletions(-)
+
+diff --git a/home_energy_manager/backend/api.py b/home_energy_manager/backend/api.py
+index 61d065e..80ed429 100644
+--- a/home_energy_manager/backend/api.py
++++ b/home_energy_manager/backend/api.py
+@@ -225,6 +225,38 @@ def _validate_managed_load_sensors(home_section: dict) -> None:
+             )
+ 
+ 
++def _validate_fuse_current(home_section: dict) -> None:
++    """Raise HTTPException(422) for a Fuse Current outside (0, 200] amps.
++
++    Fas 4b (2026-09-24): added after a real incident where 220 (a voltage,
++    not an amperage) was saved as max_fuse_current — the field previously
++    had no upper bound at all (min: 1, no max) in HomeFormSection.tsx,
++    which both Settings and the install wizard share, so the same mistake
++    was possible from either entry point. 200A is deliberately generous —
++    real Swedish household main fuses rarely exceed 63A — this is a
++    guard against an obvious typo/unit mix-up, not a realistic ceiling.
++    Mirrors the frontend gating in HomeFormSection.tsx (now max: 200) —
++    this is the server-side backstop so the API refuses the value
++    regardless of which client sent it.
++    """
++    max_fuse_current = home_section.get("max_fuse_current")
++    if max_fuse_current is None:
++        return
++    if (
++        not isinstance(max_fuse_current, (int, float))
++        or isinstance(max_fuse_current, bool)
++        or not (0 < max_fuse_current <= 200)
++    ):
++        raise HTTPException(
++            status_code=422,
++            detail=(
++                f"home.max_fuse_current must be between 0 and 200 amps "
++                f"(got {max_fuse_current!r}) — check you entered an "
++                "amperage, not a voltage."
++            ),
++        )
++
++
+ def _require_configured_system(bess_controller) -> None:
+     """Raise HTTP 503 if the BESS system has not been configured yet.
+ 
+@@ -389,6 +421,28 @@ async def patch_settings(updates: dict):
+                         detail="governor.target_kw must be a positive number",
+                     )
+ 
++            if store_key == "nibe":
++                percentile = snake_data.get("cheap_price_percentile")
++                if percentile is not None and (
++                    not isinstance(percentile, (int, float))
++                    or isinstance(percentile, bool)
++                    or not (0 <= percentile <= 1)
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.cheap_price_percentile must be between 0 and 1",
++                    )
++                min_solar = snake_data.get("min_solar_surplus_kw")
++                if min_solar is not None and (
++                    not isinstance(min_solar, (int, float))
++                    or isinstance(min_solar, bool)
++                    or min_solar < 0
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.min_solar_surplus_kw must be zero or greater",
++                    )
++
+             if store_key == "ev_scheduler":
+                 soc_cap = snake_data.get("soc_cap_percent")
+                 if soc_cap is not None and (
+@@ -444,6 +498,7 @@ async def patch_settings(updates: dict):
+                 _validate_power_monitoring_sensors(section, effective_sensors)
+                 _validate_consumption_strategy(section, effective_sensors)
+                 _validate_managed_load_sensors(section)
++                _validate_fuse_current(section)
+ 
+             if store_key == "sensors":
+                 # A sensor removal (e.g. unmapping a phase-current sensor) can
+@@ -3230,6 +3285,7 @@ async def setup_complete(payload: APISetupCompletePayload):
+             _validate_power_monitoring_sensors(home, effective_sensors)
+             _validate_consumption_strategy(home, effective_sensors)
+             _validate_managed_load_sensors(home)
++            _validate_fuse_current(home)
+             sections["home"] = home
+ 
+         # --- electricity price ---
+diff --git a/home_energy_manager/backend/app.py b/home_energy_manager/backend/app.py
+index 4020391..402b0ea 100644
+--- a/home_energy_manager/backend/app.py
++++ b/home_energy_manager/backend/app.py
+@@ -819,9 +819,14 @@ class BESSController:
+ 
+         On disable, this method deliberately does NOT force either
+         register back to a specific state — see NibeController's own
+-        docstring on the lack of a hardware fail-safe. A watchdog to cover
+-        "HA went down mid-boost" is a separate, not-yet-built piece of
+-        work, not something silently bolted onto this poll loop.
++        docstring on the lack of a hardware fail-safe.
++
++        Fas 4b: the watchdog covering "HA/this add-on went down mid-boost"
++        is now built (see NibeController.get_heat_offset/
++        seconds_since_last_contact and decide_heating_boost's
++        watchdog_reset handling) — this method's own job is just to make
++        the heartbeat read every tick, unconditionally, so the watchdog
++        clock actually advances.
+         """
+         nibe_settings = self.settings_store.get_section("nibe")
+         if not nibe_settings.get("enabled", False):
+@@ -829,6 +834,16 @@ class BESSController:
+             self.nibe_dhw_last_decision = None
+             return
+ 
++        # Watchdog heartbeat (Fas 4b): always attempted, even on cycles
++        # where the value itself isn't otherwise used, so a real pump
++        # disconnect is caught regardless of what triggered this tick.
++        # This is a pure read — never gated by test_mode/demo_mode, same
++        # as every other NibeController read.
++        self.nibe_controller.get_heat_offset()
++        seconds_since_last_nibe_contact = (
++            self.nibe_controller.seconds_since_last_contact()
++        )
++
+         governor_settings = self.settings_store.get_section("governor")
+         governor_enabled = governor_settings.get("enabled", False)
+         target_kw = governor_settings.get(
+@@ -857,6 +872,7 @@ class BESSController:
+             governor_enabled=governor_enabled,
+             current_kw=current_kw,
+             target_kw=target_kw,
++            seconds_since_last_nibe_contact=seconds_since_last_nibe_contact,
+             cheap_price_percentile=cheap_price_percentile,
+             min_solar_surplus_kw=min_solar_surplus_kw,
+         )
+@@ -884,7 +900,7 @@ class BESSController:
+         # deliberately don't touch the register in that case (see
+         # decide_dhw_luxury's own docstring).
+ 
+-        if heating_decision.status == "no_data":
++        if heating_decision.status in ("no_data", "watchdog_reset"):
+             logger.warning("nibe heating: %s", heating_decision.reason)
+         else:
+             logger.debug("nibe heating: %s", heating_decision.reason)
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index a04f305..7fd14f3 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.3"
++version: "0.1.4"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/core/nibe/controller.py b/home_energy_manager/core/nibe/controller.py
+index 0bcd593..d91e9a6 100644
+--- a/home_energy_manager/core/nibe/controller.py
++++ b/home_energy_manager/core/nibe/controller.py
+@@ -58,8 +58,15 @@ NO FAIL-SAFE ON DISCONNECT (read before wiring this into anything unattended)
+     pattern for the now-removed Nibe lever in peak_power_governor.py and
+     its timer.peak_governor_safety watchdog — the same watchdog needs to
+     exist again before this controller's writes run outside demo mode.
+-    Not built yet; tracked in the project status doc, not silently
+-    assumed away here.
++    Built in Fas 4b (2026-09-24): get_heat_offset()/seconds_since_last_contact()
++    below track live contact, and core/nibe/decision.py's
++    decide_heating_boost() forces the curve offset back to neutral
++    (status "watchdog_reset") after DEFAULT_WATCHDOG_TIMEOUT_S (15 min)
++    with no confirmed contact while headroom is unknown. This covers "HA
++    or this add-on stops running" — it does NOT cover "the pump itself
++    loses power/Modbus but this add-on keeps running and keeps reading a
++    stale cached state from HA", which would need a staleness check on
++    the entity's own last_updated timestamp, not built here.
+ 
+ WHY A SEPARATE CLASS, NOT PART OF ZaptecController
+     Different device, different entity domains (number + select here vs.
+@@ -72,6 +79,7 @@ WHY A SEPARATE CLASS, NOT PART OF ZaptecController
+ """
+ 
+ import logging
++import time
+ 
+ import requests
+ 
+@@ -122,6 +130,13 @@ class NibeController:
+         self.dhw_comfort_mode_entity = dhw_comfort_mode_entity
+         self.test_mode = test_mode
+         self.session = requests.Session()
++        # Fas 4b watchdog: set by get_heat_offset() on every successful read,
++        # never by anything else. time.monotonic() rather than time.time()
++        # so an NTP clock jump can't produce a bogus timeout or a bogus
++        # "just contacted" reading. None until the first successful read
++        # since this process started — see decide_heating_boost's own
++        # handling of that startup-grace case.
++        self.last_contact_monotonic: float | None = None
+ 
+     def set_test_mode(self, enabled: bool) -> None:
+         """Flip the safety gate. See module docstring — driven by Demo Mode."""
+@@ -133,14 +148,34 @@ class NibeController:
+     # ------------------------------------------------------------------
+ 
+     def get_heat_offset(self) -> float | None:
+-        """Current number.heat_offset_s1_* value, or None if unavailable."""
++        """Current number.heat_offset_s1_* value, or None if unavailable.
++
++        Fas 4b: this is also the watchdog's own heartbeat — every call that
++        successfully parses a value updates last_contact_monotonic,
++        regardless of what _poll_nibe does with the returned value. It's
++        called every 30s tick unconditionally (see app.py's _poll_nibe) so
++        the watchdog stays live even on cycles that otherwise only care
++        about headroom/price/solar, not the current offset.
++        """
+         raw = self._get_raw_state(self.heat_offset_entity)
+         if raw is None:
+             return None
+         try:
+-            return float(raw)
++            value = float(raw)
+         except ValueError:
+             return None
++        self.last_contact_monotonic = time.monotonic()
++        return value
++
++    def seconds_since_last_contact(self) -> float | None:
++        """Seconds since get_heat_offset() last confirmed a live read from
++        the pump, or None if no read has succeeded yet since this process
++        started. See decide_heating_boost's watchdog handling for why a
++        fresh-startup None is deliberately not the same thing as a timeout.
++        """
++        if self.last_contact_monotonic is None:
++            return None
++        return time.monotonic() - self.last_contact_monotonic
+ 
+     def get_dhw_comfort_mode(self) -> str | None:
+         """Raw select state (e.g. "NORMAL"/"ECONOMY"/"LUXURY"/"SMART CONTROL"),
+diff --git a/home_energy_manager/core/nibe/decision.py b/home_energy_manager/core/nibe/decision.py
+index 1e69b1b..3007216 100644
+--- a/home_energy_manager/core/nibe/decision.py
++++ b/home_energy_manager/core/nibe/decision.py
+@@ -112,6 +112,13 @@ DEFAULT_CHEAP_PRICE_PERCENTILE = 0.5  # cheaper half of today's known hours —
+ DEFAULT_MIN_SOLAR_SURPLUS_KW = 0.0
+ DEFAULT_HEADROOM_MARGIN_KW = 0.0  # v1 scope: any positive headroom counts, no safety buffer beyond target_kw itself
+ 
++# Fas 4b (2026-09-24) — the watchdog controller.py's own docstring calls a
++# "hard requirement before this runs beyond demo mode". 15 minutes: long
++# enough that a normal transient (HA restart, brief network hiccup) never
++# trips it, short enough that a genuinely lost connection doesn't leave a
++# stuck curve-offset boost in place for the rest of a heating season.
++DEFAULT_WATCHDOG_TIMEOUT_S = 900
++
+ # The register (number.heat_offset_s1_47011) allows -10..+10 in steps of 1,
+ # but this module only ever asks for a small, conservative nudge — not the
+ # full range a person adjusting the pump's own menu might use. +2 was
+@@ -126,11 +133,12 @@ MAX_SAFE_HEAT_OFFSET_C = 2  # decision-layer ceiling; controller.py clamps again
+ class HeatingBoostDecision:
+     """Whether the space-heating curve-offset lever should be engaged this cycle.
+ 
+-    status: "no_data" | "no_headroom" | "engaged_cheap_price" |
+-        "engaged_solar_surplus" | "normal"
++    status: "no_data" | "watchdog_reset" | "no_headroom" |
++        "engaged_cheap_price" | "engaged_solar_surplus" | "normal"
+     heat_offset_c: the value to write to number.heat_offset_s1_47011 —
+-        DEFAULT_HEAT_OFFSET_BOOST_C while boosting, 0 for Normal, None
+-        only for no_data (don't touch the register at all that cycle).
++        DEFAULT_HEAT_OFFSET_BOOST_C while boosting, 0 for Normal or
++        watchdog_reset, None only for no_data (don't touch the register at
++        all that cycle).
+     """
+ 
+     status: str
+@@ -184,12 +192,21 @@ def decide_heating_boost(
+     governor_enabled: bool,
+     current_kw: float | None,
+     target_kw: float | None,
++    seconds_since_last_nibe_contact: float | None = None,
+     cheap_price_percentile: float = DEFAULT_CHEAP_PRICE_PERCENTILE,
+     min_solar_surplus_kw: float = DEFAULT_MIN_SOLAR_SURPLUS_KW,
+     headroom_margin_kw: float = DEFAULT_HEADROOM_MARGIN_KW,
+     heat_offset_boost_c: int = DEFAULT_HEAT_OFFSET_BOOST_C,
++    watchdog_timeout_s: float = DEFAULT_WATCHDOG_TIMEOUT_S,
+ ) -> HeatingBoostDecision:
+-    """Pure decision for the space-heating curve-offset comfort-boost lever."""
++    """Pure decision for the space-heating curve-offset comfort-boost lever.
++
++    seconds_since_last_nibe_contact: how long since NibeController last
++        confirmed a successful read from the pump (its own
++        seconds_since_last_contact()), or None if no read has succeeded yet
++        since this add-on started. Only consulted in the headroom-unknown
++        branch below — see the watchdog note there for why.
++    """
+     headroom = _headroom_available(
+         governor_enabled=governor_enabled,
+         current_kw=current_kw,
+@@ -197,6 +214,35 @@ def decide_heating_boost(
+         margin_kw=headroom_margin_kw,
+     )
+     if headroom is None:
++        # Watchdog (Fas 4b): headroom being unprovable is the one case a
++        # stuck non-zero offset can persist indefinitely (see
++        # controller.py's "NO FAIL-SAFE ON DISCONNECT"), because it's the
++        # only branch that can repeatedly return heat_offset_c=None
++        # ("don't touch the register") cycle after cycle. If the pump
++        # itself has also been unreachable for a long stretch — not just
++        # this cycle's headroom reading, but no confirmed contact at all
++        # — force the register back to neutral instead of leaving
++        # whatever it was last set to in place.
++        #
++        # seconds_since_last_nibe_contact is None right after startup
++        # (no read has succeeded yet) — deliberately NOT treated as a
++        # timeout, same "burden of proof" convention as the price/solar
++        # exceptions above: no evidence of a problem yet is not evidence
++        # of one.
++        if (
++            seconds_since_last_nibe_contact is not None
++            and seconds_since_last_nibe_contact >= watchdog_timeout_s
++        ):
++            return HeatingBoostDecision(
++                status="watchdog_reset",
++                heat_offset_c=0,
++                reason=(
++                    f"no confirmed contact with the pump for "
++                    f"{seconds_since_last_nibe_contact:.0f}s "
++                    f"(>= {watchdog_timeout_s:.0f}s) while headroom is "
++                    "unknown — forcing curve offset back to neutral"
++                ),
++            )
+         return HeatingBoostDecision(
+             status="no_data",
+             heat_offset_c=None,
+diff --git a/home_energy_manager/core/nibe/tests/test_decision.py b/home_energy_manager/core/nibe/tests/test_decision.py
+index 262a977..ffc596b 100644
+--- a/home_energy_manager/core/nibe/tests/test_decision.py
++++ b/home_energy_manager/core/nibe/tests/test_decision.py
+@@ -5,6 +5,7 @@ same way app.py's own `from core.governor import peak_governor` expects).
+ 
+ from core.nibe.decision import (
+     DEFAULT_HEAT_OFFSET_BOOST_C,
++    DEFAULT_WATCHDOG_TIMEOUT_S,
+     decide_dhw_luxury,
+     decide_heating_boost,
+ )
+@@ -128,6 +129,91 @@ def test_heating_boost_offset_never_exceeds_configured_max():
+     assert d.heat_offset_c == 2
+ 
+ 
++# ---------------------------------------------------------------------------
++# decide_heating_boost — Fas 4b watchdog (seconds_since_last_nibe_contact)
++# ---------------------------------------------------------------------------
++
++
++def test_watchdog_not_triggered_under_threshold():
++    """Just under the timeout, with headroom still unprovable: stays
++    no_data, register untouched — same as if no watchdog existed at all."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=True,
++        current_kw=None,
++        target_kw=12.0,
++        seconds_since_last_nibe_contact=DEFAULT_WATCHDOG_TIMEOUT_S - 1,
++    )
++    assert d.status == "no_data"
++    assert d.heat_offset_c is None
++
++
++def test_watchdog_none_contact_behaves_like_fresh_contact():
++    """No confirmed contact yet since startup (None) must NOT be treated as
++    an infinitely-stale timeout — it's the normal state for the first tick
++    or two after this add-on starts, and must not falsely trigger the
++    watchdog before the pump has even been reached once."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=True,
++        current_kw=None,
++        target_kw=12.0,
++        seconds_since_last_nibe_contact=None,
++    )
++    assert d.status == "no_data"
++    assert d.heat_offset_c is None
++
++
++def test_watchdog_triggers_at_exactly_the_timeout():
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=True,
++        current_kw=None,
++        target_kw=12.0,
++        seconds_since_last_nibe_contact=DEFAULT_WATCHDOG_TIMEOUT_S,
++    )
++    assert d.status == "watchdog_reset"
++    assert d.heat_offset_c == 0
++
++
++def test_watchdog_does_not_affect_cycles_with_known_headroom():
++    """A huge seconds_since_last_nibe_contact must not matter at all once
++    headroom is actually provable (True or False) — the watchdog only
++    exists to cover the headroom-UNKNOWN branch, not to second-guess a
++    cycle that already has a real answer."""
++    huge_gap = DEFAULT_WATCHDOG_TIMEOUT_S * 100
++
++    d_has_headroom = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=True,
++        current_kw=5.0,
++        target_kw=12.0,
++        seconds_since_last_nibe_contact=huge_gap,
++    )
++    assert d_has_headroom.status == "engaged_cheap_price"
++    assert d_has_headroom.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
++
++    d_no_headroom = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=True,
++        current_kw=12.0,
++        target_kw=12.0,
++        seconds_since_last_nibe_contact=huge_gap,
++    )
++    assert d_no_headroom.status == "no_headroom"
++    assert d_no_headroom.heat_offset_c == 0
++
++
+ # ---------------------------------------------------------------------------
+ # decide_dhw_luxury
+ # ---------------------------------------------------------------------------
+diff --git a/home_energy_manager/frontend/src/components/NibeStatusCard.tsx b/home_energy_manager/frontend/src/components/NibeStatusCard.tsx
+index 5b85ff6..4a44de7 100644
+--- a/home_energy_manager/frontend/src/components/NibeStatusCard.tsx
++++ b/home_energy_manager/frontend/src/components/NibeStatusCard.tsx
+@@ -11,6 +11,7 @@ const HEATING_STATUS_LABELS: Record<string, string> = {
+   engaged_cheap_price: 'Extra värme — billig timme',
+   engaged_solar_surplus: 'Extra värme — solöverskott',
+   normal: 'Normalläge',
++  watchdog_reset: 'Säkerhetsåterställd till normalläge — ingen kontakt med pumpen på länge',
+ };
+ 
+ const HEATING_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' | 'purple'> = {
+@@ -19,6 +20,7 @@ const HEATING_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red'
+   engaged_cheap_price: 'green',
+   engaged_solar_surplus: 'green',
+   normal: 'blue',
++  watchdog_reset: 'red',
+ };
+ 
+ // Swedish labels for decide_dhw_luxury()'s status values.
+diff --git a/home_energy_manager/frontend/src/components/settings/HomeFormSection.tsx b/home_energy_manager/frontend/src/components/settings/HomeFormSection.tsx
+index 40946b8..0097fcb 100644
+--- a/home_energy_manager/frontend/src/components/settings/HomeFormSection.tsx
++++ b/home_energy_manager/frontend/src/components/settings/HomeFormSection.tsx
+@@ -195,7 +195,7 @@ export function HomeFormSection({ form, onChange, sensors }: Props) {
+         {form.powerMonitoringEnabled && (
+           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-1">
+             {numField('Fuse Current', form.maxFuseCurrent,
+-              v => onChange({ ...form, maxFuseCurrent: Math.round(v) }), { unit: 'A', min: 1, step: 1 })}
++              v => onChange({ ...form, maxFuseCurrent: Math.round(v) }), { unit: 'A', min: 1, max: 200, step: 1 })}
+             {numField('Voltage', form.voltage,
+               v => onChange({ ...form, voltage: Math.round(v) }), { unit: 'V', min: 100, step: 1 })}
+             {numField('Safety Margin Factor', form.safetyMarginFactor,
+diff --git a/home_energy_manager/frontend/src/hooks/useNibeStatus.ts b/home_energy_manager/frontend/src/hooks/useNibeStatus.ts
+index d147502..58c093a 100644
+--- a/home_energy_manager/frontend/src/hooks/useNibeStatus.ts
++++ b/home_energy_manager/frontend/src/hooks/useNibeStatus.ts
+@@ -13,6 +13,7 @@ export interface NibeStatusResponse {
+       | 'engaged_cheap_price'
+       | 'engaged_solar_surplus'
+       | 'normal'
++      | 'watchdog_reset'
+       | null;
+     offsetC: number | null;
+     reason: string | null;
+diff --git a/home_energy_manager/frontend/src/pages/SettingsPage.tsx b/home_energy_manager/frontend/src/pages/SettingsPage.tsx
+index e745612..988e95c 100644
+--- a/home_energy_manager/frontend/src/pages/SettingsPage.tsx
++++ b/home_energy_manager/frontend/src/pages/SettingsPage.tsx
+@@ -105,6 +105,17 @@ const SettingsPage: React.FC = () => {
+   const [savedEvLowPriceThresholdOre, setSavedEvLowPriceThresholdOre] = useState(0.0);
+   const [evCheapPricePercentile, setEvCheapPricePercentile] = useState(0.5);
+   const [savedEvCheapPricePercentile, setSavedEvCheapPricePercentile] = useState(0.5);
++  // Fas 4b: Nibe F750 heat-pump comfort levers. Same feature-flag reasoning
++  // as the governor/EV scheduler above — writes are already gated by the
++  // shared demo_mode/test_mode flag via NibeController.test_mode.
++  const [nibeEnabled, setNibeEnabled] = useState(false);
++  const [savedNibeEnabled, setSavedNibeEnabled] = useState(false);
++  const [nibeDhwLuxuryEnabled, setNibeDhwLuxuryEnabled] = useState(false);
++  const [savedNibeDhwLuxuryEnabled, setSavedNibeDhwLuxuryEnabled] = useState(false);
++  const [nibeCheapPricePercentile, setNibeCheapPricePercentile] = useState(0.5);
++  const [savedNibeCheapPricePercentile, setSavedNibeCheapPricePercentile] = useState(0.5);
++  const [nibeMinSolarSurplusKw, setNibeMinSolarSurplusKw] = useState(0.0);
++  const [savedNibeMinSolarSurplusKw, setSavedNibeMinSolarSurplusKw] = useState(0.0);
+ 
+   // ── saved snapshots (for dirty detection) ──────────────────────────────
+   const savedBattery = useRef<string>('');
+@@ -145,7 +156,11 @@ const SettingsPage: React.FC = () => {
+       evSchedulerEnabled !== savedEvSchedulerEnabled ||
+       evSocCapPercent !== savedEvSocCapPercent ||
+       evLowPriceThresholdOre !== savedEvLowPriceThresholdOre ||
+-      evCheapPricePercentile !== savedEvCheapPricePercentile,
++      evCheapPricePercentile !== savedEvCheapPricePercentile ||
++      nibeEnabled !== savedNibeEnabled ||
++      nibeDhwLuxuryEnabled !== savedNibeDhwLuxuryEnabled ||
++      nibeCheapPricePercentile !== savedNibeCheapPricePercentile ||
++      nibeMinSolarSurplusKw !== savedNibeMinSolarSurplusKw,
+   };
+ 
+   // ── loading / saving / error state ────────────────────────────────────
+@@ -295,6 +310,16 @@ const SettingsPage: React.FC = () => {
+       setEvCheapPricePercentile(evSched.cheapPricePercentile ?? 0.5);
+       setSavedEvCheapPricePercentile(evSched.cheapPricePercentile ?? 0.5);
+ 
++      const nibe = s.nibe ?? {};
++      setNibeEnabled(nibe.enabled ?? false);
++      setSavedNibeEnabled(nibe.enabled ?? false);
++      setNibeDhwLuxuryEnabled(nibe.dhwLuxuryEnabled ?? false);
++      setSavedNibeDhwLuxuryEnabled(nibe.dhwLuxuryEnabled ?? false);
++      setNibeCheapPricePercentile(nibe.cheapPricePercentile ?? 0.5);
++      setSavedNibeCheapPricePercentile(nibe.cheapPricePercentile ?? 0.5);
++      setNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
++      setSavedNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
++
+       if (healthRes.data?.checks) {
+         const map: Record<string, HealthStatus> = {};
+         for (const component of healthRes.data.checks) {
+@@ -598,6 +623,12 @@ const SettingsPage: React.FC = () => {
+           lowPriceThresholdOre: evLowPriceThresholdOre,
+           cheapPricePercentile: evCheapPricePercentile,
+         },
++        nibe: {
++          enabled: nibeEnabled,
++          dhwLuxuryEnabled: nibeDhwLuxuryEnabled,
++          cheapPricePercentile: nibeCheapPricePercentile,
++          minSolarSurplusKw: nibeMinSolarSurplusKw,
++        },
+       });
+       setSavedDemoEnabled(demoEnabled);
+       savedAi.current = JSON.stringify(aiForm);
+@@ -607,6 +638,10 @@ const SettingsPage: React.FC = () => {
+       setSavedEvSocCapPercent(evSocCapPercent);
+       setSavedEvLowPriceThresholdOre(evLowPriceThresholdOre);
+       setSavedEvCheapPricePercentile(evCheapPricePercentile);
++      setSavedNibeEnabled(nibeEnabled);
++      setSavedNibeDhwLuxuryEnabled(nibeDhwLuxuryEnabled);
++      setSavedNibeCheapPricePercentile(nibeCheapPricePercentile);
++      setSavedNibeMinSolarSurplusKw(nibeMinSolarSurplusKw);
+       window.dispatchEvent(new Event('bess:demo-mode-changed'));
+       setToast({ type: 'success', message: 'System settings saved.' });
+     } catch (err) {
+@@ -877,6 +912,27 @@ const SettingsPage: React.FC = () => {
+                 </p>
+               </SectionCard>
+ 
++              {/* Fas 4b: Nibe F750 heat-pump comfort levers */}
++              <SectionCard
++                title="Nibe F750"
++                description="Höjer rumsuppvärmningens värmekurva-offset och/eller sätter varmvatten i Lyxläge vid billig el eller solöverskott — alltid inom effektvaktens utrymme om den är aktiv. 'Lyxläge varmvatten' är samma brytare som Dashboard-kortets egen — går att styra härifrån också, inte en andra oberoende inställning."
++              >
++                {toggle('Aktiverad (uppvärmning)', nibeEnabled, setNibeEnabled)}
++                {toggle('Lyxläge varmvatten', nibeDhwLuxuryEnabled, setNibeDhwLuxuryEnabled)}
++                {numField(
++                  'Andel billigaste timmar',
++                  nibeCheapPricePercentile,
++                  setNibeCheapPricePercentile,
++                  { min: 0, max: 1, step: 0.05 },
++                )}
++                {numField(
++                  'Min. solöverskott för att boosta',
++                  nibeMinSolarSurplusKw,
++                  setNibeMinSolarSurplusKw,
++                  { min: 0, max: 20, step: 0.1, unit: 'kW' },
++                )}
++              </SectionCard>
++
+               {/* AI Analyst */}
+               <AIAnalystSettings form={aiForm} onChange={setAiForm} />
+ 
+-- 
+2.43.0
+
