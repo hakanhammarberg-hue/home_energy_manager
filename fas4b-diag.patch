@@ -1,0 +1,53 @@
+From 43ffdb608da7031ad4f45cea651d2ee9a12b74cc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 18:35:30 +0000
+Subject: [PATCH] Fas 4b rollout diagnostic: version bump + build marker
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bumps to 0.1.5 and adds a one-line console.log build marker
+(BUILD-DIAG-FAS4B-0002) in main.tsx so we can confirm a fresh push
+actually reaches the frontend bundle Supervisor builds and serves —
+the previous 0.1.4 build served byte-identical frontend files to the
+old pre-Fas-4b add-on despite the source having changed. Safe to
+remove the marker once the Nibe settings card is confirmed live.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ home_energy_manager/config.yaml           | 2 +-
+ home_energy_manager/frontend/src/main.tsx | 5 +++++
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 7fd14f3..63810c2 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.4"
++version: "0.1.5"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/frontend/src/main.tsx b/home_energy_manager/frontend/src/main.tsx
+index 061fbce..cfd5fe2 100644
+--- a/home_energy_manager/frontend/src/main.tsx
++++ b/home_energy_manager/frontend/src/main.tsx
+@@ -3,6 +3,11 @@ import React from 'react'
+ import ReactDOM from 'react-dom/client'
+ import App from './App'
+ 
++// Fas 4b rollout diagnostic (2026-09-24): confirms a fresh git push actually
++// reaches the frontend bundle Supervisor builds and serves. Safe to remove
++// once the Nibe settings card is confirmed showing up in the live UI.
++console.log('BUILD-DIAG-FAS4B-0002')
++
+ ReactDOM.createRoot(document.getElementById('root')!).render(
+   <React.StrictMode>
+     <App />
+-- 
+2.43.0
+
