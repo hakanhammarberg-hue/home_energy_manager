@@ -195,7 +195,7 @@ export function HomeFormSection({ form, onChange, sensors }: Props) {
         {form.powerMonitoringEnabled && (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-1">
             {numField('Fuse Current', form.maxFuseCurrent,
-              v => onChange({ ...form, maxFuseCurrent: Math.round(v) }), { unit: 'A', min: 1, step: 1 })}
+              v => onChange({ ...form, maxFuseCurrent: Math.round(v) }), { unit: 'A', min: 1, max: 200, step: 1 })}
             {numField('Voltage', form.voltage,
               v => onChange({ ...form, voltage: Math.round(v) }), { unit: 'V', min: 100, step: 1 })}
             {numField('Safety Margin Factor', form.safetyMarginFactor,

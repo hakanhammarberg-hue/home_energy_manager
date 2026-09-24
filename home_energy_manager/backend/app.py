@@ -819,15 +819,30 @@ class BESSController:
 
         On disable, this method deliberately does NOT force either
         register back to a specific state — see NibeController's own
-        docstring on the lack of a hardware fail-safe. A watchdog to cover
-        "HA went down mid-boost" is a separate, not-yet-built piece of
-        work, not something silently bolted onto this poll loop.
+        docstring on the lack of a hardware fail-safe.
+
+        Fas 4b: the watchdog covering "HA/this add-on went down mid-boost"
+        is now built (see NibeController.get_heat_offset/
+        seconds_since_last_contact and decide_heating_boost's
+        watchdog_reset handling) — this method's own job is just to make
+        the heartbeat read every tick, unconditionally, so the watchdog
+        clock actually advances.
         """
         nibe_settings = self.settings_store.get_section("nibe")
         if not nibe_settings.get("enabled", False):
             self.nibe_heating_last_decision = None
             self.nibe_dhw_last_decision = None
             return
+
+        # Watchdog heartbeat (Fas 4b): always attempted, even on cycles
+        # where the value itself isn't otherwise used, so a real pump
+        # disconnect is caught regardless of what triggered this tick.
+        # This is a pure read — never gated by test_mode/demo_mode, same
+        # as every other NibeController read.
+        self.nibe_controller.get_heat_offset()
+        seconds_since_last_nibe_contact = (
+            self.nibe_controller.seconds_since_last_contact()
+        )
 
         governor_settings = self.settings_store.get_section("governor")
         governor_enabled = governor_settings.get("enabled", False)
@@ -857,6 +872,7 @@ class BESSController:
             governor_enabled=governor_enabled,
             current_kw=current_kw,
             target_kw=target_kw,
+            seconds_since_last_nibe_contact=seconds_since_last_nibe_contact,
             cheap_price_percentile=cheap_price_percentile,
             min_solar_surplus_kw=min_solar_surplus_kw,
         )
@@ -884,7 +900,7 @@ class BESSController:
         # deliberately don't touch the register in that case (see
         # decide_dhw_luxury's own docstring).
 
-        if heating_decision.status == "no_data":
+        if heating_decision.status in ("no_data", "watchdog_reset"):
             logger.warning("nibe heating: %s", heating_decision.reason)
         else:
             logger.debug("nibe heating: %s", heating_decision.reason)

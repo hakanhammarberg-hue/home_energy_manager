@@ -58,8 +58,15 @@ NO FAIL-SAFE ON DISCONNECT (read before wiring this into anything unattended)
     pattern for the now-removed Nibe lever in peak_power_governor.py and
     its timer.peak_governor_safety watchdog — the same watchdog needs to
     exist again before this controller's writes run outside demo mode.
-    Not built yet; tracked in the project status doc, not silently
-    assumed away here.
+    Built in Fas 4b (2026-09-24): get_heat_offset()/seconds_since_last_contact()
+    below track live contact, and core/nibe/decision.py's
+    decide_heating_boost() forces the curve offset back to neutral
+    (status "watchdog_reset") after DEFAULT_WATCHDOG_TIMEOUT_S (15 min)
+    with no confirmed contact while headroom is unknown. This covers "HA
+    or this add-on stops running" — it does NOT cover "the pump itself
+    loses power/Modbus but this add-on keeps running and keeps reading a
+    stale cached state from HA", which would need a staleness check on
+    the entity's own last_updated timestamp, not built here.
 
 WHY A SEPARATE CLASS, NOT PART OF ZaptecController
     Different device, different entity domains (number + select here vs.
@@ -72,6 +79,7 @@ WHY A SEPARATE CLASS, NOT PART OF ZaptecController
 """
 
 import logging
+import time
 
 import requests
 
@@ -122,6 +130,13 @@ class NibeController:
         self.dhw_comfort_mode_entity = dhw_comfort_mode_entity
         self.test_mode = test_mode
         self.session = requests.Session()
+        # Fas 4b watchdog: set by get_heat_offset() on every successful read,
+        # never by anything else. time.monotonic() rather than time.time()
+        # so an NTP clock jump can't produce a bogus timeout or a bogus
+        # "just contacted" reading. None until the first successful read
+        # since this process started — see decide_heating_boost's own
+        # handling of that startup-grace case.
+        self.last_contact_monotonic: float | None = None
 
     def set_test_mode(self, enabled: bool) -> None:
         """Flip the safety gate. See module docstring — driven by Demo Mode."""
@@ -133,14 +148,34 @@ class NibeController:
     # ------------------------------------------------------------------
 
     def get_heat_offset(self) -> float | None:
-        """Current number.heat_offset_s1_* value, or None if unavailable."""
+        """Current number.heat_offset_s1_* value, or None if unavailable.
+
+        Fas 4b: this is also the watchdog's own heartbeat — every call that
+        successfully parses a value updates last_contact_monotonic,
+        regardless of what _poll_nibe does with the returned value. It's
+        called every 30s tick unconditionally (see app.py's _poll_nibe) so
+        the watchdog stays live even on cycles that otherwise only care
+        about headroom/price/solar, not the current offset.
+        """
         raw = self._get_raw_state(self.heat_offset_entity)
         if raw is None:
             return None
         try:
-            return float(raw)
+            value = float(raw)
         except ValueError:
             return None
+        self.last_contact_monotonic = time.monotonic()
+        return value
+
+    def seconds_since_last_contact(self) -> float | None:
+        """Seconds since get_heat_offset() last confirmed a live read from
+        the pump, or None if no read has succeeded yet since this process
+        started. See decide_heating_boost's watchdog handling for why a
+        fresh-startup None is deliberately not the same thing as a timeout.
+        """
+        if self.last_contact_monotonic is None:
+            return None
+        return time.monotonic() - self.last_contact_monotonic
 
     def get_dhw_comfort_mode(self) -> str | None:
         """Raw select state (e.g. "NORMAL"/"ECONOMY"/"LUXURY"/"SMART CONTROL"),

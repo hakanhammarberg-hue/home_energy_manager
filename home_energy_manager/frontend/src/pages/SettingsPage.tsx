@@ -105,6 +105,17 @@ const SettingsPage: React.FC = () => {
   const [savedEvLowPriceThresholdOre, setSavedEvLowPriceThresholdOre] = useState(0.0);
   const [evCheapPricePercentile, setEvCheapPricePercentile] = useState(0.5);
   const [savedEvCheapPricePercentile, setSavedEvCheapPricePercentile] = useState(0.5);
+  // Fas 4b: Nibe F750 heat-pump comfort levers. Same feature-flag reasoning
+  // as the governor/EV scheduler above — writes are already gated by the
+  // shared demo_mode/test_mode flag via NibeController.test_mode.
+  const [nibeEnabled, setNibeEnabled] = useState(false);
+  const [savedNibeEnabled, setSavedNibeEnabled] = useState(false);
+  const [nibeDhwLuxuryEnabled, setNibeDhwLuxuryEnabled] = useState(false);
+  const [savedNibeDhwLuxuryEnabled, setSavedNibeDhwLuxuryEnabled] = useState(false);
+  const [nibeCheapPricePercentile, setNibeCheapPricePercentile] = useState(0.5);
+  const [savedNibeCheapPricePercentile, setSavedNibeCheapPricePercentile] = useState(0.5);
+  const [nibeMinSolarSurplusKw, setNibeMinSolarSurplusKw] = useState(0.0);
+  const [savedNibeMinSolarSurplusKw, setSavedNibeMinSolarSurplusKw] = useState(0.0);
 
   // ── saved snapshots (for dirty detection) ──────────────────────────────
   const savedBattery = useRef<string>('');
@@ -145,7 +156,11 @@ const SettingsPage: React.FC = () => {
       evSchedulerEnabled !== savedEvSchedulerEnabled ||
       evSocCapPercent !== savedEvSocCapPercent ||
       evLowPriceThresholdOre !== savedEvLowPriceThresholdOre ||
-      evCheapPricePercentile !== savedEvCheapPricePercentile,
+      evCheapPricePercentile !== savedEvCheapPricePercentile ||
+      nibeEnabled !== savedNibeEnabled ||
+      nibeDhwLuxuryEnabled !== savedNibeDhwLuxuryEnabled ||
+      nibeCheapPricePercentile !== savedNibeCheapPricePercentile ||
+      nibeMinSolarSurplusKw !== savedNibeMinSolarSurplusKw,
   };
 
   // ── loading / saving / error state ────────────────────────────────────
@@ -294,6 +309,16 @@ const SettingsPage: React.FC = () => {
       setSavedEvLowPriceThresholdOre(evSched.lowPriceThresholdOre ?? 0.0);
       setEvCheapPricePercentile(evSched.cheapPricePercentile ?? 0.5);
       setSavedEvCheapPricePercentile(evSched.cheapPricePercentile ?? 0.5);
+
+      const nibe = s.nibe ?? {};
+      setNibeEnabled(nibe.enabled ?? false);
+      setSavedNibeEnabled(nibe.enabled ?? false);
+      setNibeDhwLuxuryEnabled(nibe.dhwLuxuryEnabled ?? false);
+      setSavedNibeDhwLuxuryEnabled(nibe.dhwLuxuryEnabled ?? false);
+      setNibeCheapPricePercentile(nibe.cheapPricePercentile ?? 0.5);
+      setSavedNibeCheapPricePercentile(nibe.cheapPricePercentile ?? 0.5);
+      setNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
+      setSavedNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
 
       if (healthRes.data?.checks) {
         const map: Record<string, HealthStatus> = {};
@@ -598,6 +623,12 @@ const SettingsPage: React.FC = () => {
           lowPriceThresholdOre: evLowPriceThresholdOre,
           cheapPricePercentile: evCheapPricePercentile,
         },
+        nibe: {
+          enabled: nibeEnabled,
+          dhwLuxuryEnabled: nibeDhwLuxuryEnabled,
+          cheapPricePercentile: nibeCheapPricePercentile,
+          minSolarSurplusKw: nibeMinSolarSurplusKw,
+        },
       });
       setSavedDemoEnabled(demoEnabled);
       savedAi.current = JSON.stringify(aiForm);
@@ -607,6 +638,10 @@ const SettingsPage: React.FC = () => {
       setSavedEvSocCapPercent(evSocCapPercent);
       setSavedEvLowPriceThresholdOre(evLowPriceThresholdOre);
       setSavedEvCheapPricePercentile(evCheapPricePercentile);
+      setSavedNibeEnabled(nibeEnabled);
+      setSavedNibeDhwLuxuryEnabled(nibeDhwLuxuryEnabled);
+      setSavedNibeCheapPricePercentile(nibeCheapPricePercentile);
+      setSavedNibeMinSolarSurplusKw(nibeMinSolarSurplusKw);
       window.dispatchEvent(new Event('bess:demo-mode-changed'));
       setToast({ type: 'success', message: 'System settings saved.' });
     } catch (err) {
@@ -875,6 +910,27 @@ const SettingsPage: React.FC = () => {
                   Denna brytare styr bara om schemaläggaren är aktiv — inte samma sak som Demo
                   Mode ovan. Batteriet laddar aldrig ur till bilen oavsett dessa inställningar.
                 </p>
+              </SectionCard>
+
+              {/* Fas 4b: Nibe F750 heat-pump comfort levers */}
+              <SectionCard
+                title="Nibe F750"
+                description="Höjer rumsuppvärmningens värmekurva-offset och/eller sätter varmvatten i Lyxläge vid billig el eller solöverskott — alltid inom effektvaktens utrymme om den är aktiv. 'Lyxläge varmvatten' är samma brytare som Dashboard-kortets egen — går att styra härifrån också, inte en andra oberoende inställning."
+              >
+                {toggle('Aktiverad (uppvärmning)', nibeEnabled, setNibeEnabled)}
+                {toggle('Lyxläge varmvatten', nibeDhwLuxuryEnabled, setNibeDhwLuxuryEnabled)}
+                {numField(
+                  'Andel billigaste timmar',
+                  nibeCheapPricePercentile,
+                  setNibeCheapPricePercentile,
+                  { min: 0, max: 1, step: 0.05 },
+                )}
+                {numField(
+                  'Min. solöverskott för att boosta',
+                  nibeMinSolarSurplusKw,
+                  setNibeMinSolarSurplusKw,
+                  { min: 0, max: 20, step: 0.1, unit: 'kW' },
+                )}
               </SectionCard>
 
               {/* AI Analyst */}

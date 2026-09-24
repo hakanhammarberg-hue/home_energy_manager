@@ -13,6 +13,7 @@ export interface NibeStatusResponse {
       | 'engaged_cheap_price'
       | 'engaged_solar_surplus'
       | 'normal'
+      | 'watchdog_reset'
       | null;
     offsetC: number | null;
     reason: string | null;

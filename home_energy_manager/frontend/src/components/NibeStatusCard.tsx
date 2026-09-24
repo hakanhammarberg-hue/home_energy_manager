@@ -11,6 +11,7 @@ const HEATING_STATUS_LABELS: Record<string, string> = {
   engaged_cheap_price: 'Extra värme — billig timme',
   engaged_solar_surplus: 'Extra värme — solöverskott',
   normal: 'Normalläge',
+  watchdog_reset: 'Säkerhetsåterställd till normalläge — ingen kontakt med pumpen på länge',
 };
 
 const HEATING_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' | 'purple'> = {
@@ -19,6 +20,7 @@ const HEATING_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' 
   engaged_cheap_price: 'green',
   engaged_solar_surplus: 'green',
   normal: 'blue',
+  watchdog_reset: 'red',
 };
 
 // Swedish labels for decide_dhw_luxury()'s status values.

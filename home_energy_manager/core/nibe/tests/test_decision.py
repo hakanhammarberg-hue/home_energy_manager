@@ -5,6 +5,7 @@ same way app.py's own `from core.governor import peak_governor` expects).
 
 from core.nibe.decision import (
     DEFAULT_HEAT_OFFSET_BOOST_C,
+    DEFAULT_WATCHDOG_TIMEOUT_S,
     decide_dhw_luxury,
     decide_heating_boost,
 )
@@ -126,6 +127,91 @@ def test_heating_boost_offset_never_exceeds_configured_max():
         target_kw=None,
     )
     assert d.heat_offset_c == 2
+
+
+# ---------------------------------------------------------------------------
+# decide_heating_boost — Fas 4b watchdog (seconds_since_last_nibe_contact)
+# ---------------------------------------------------------------------------
+
+
+def test_watchdog_not_triggered_under_threshold():
+    """Just under the timeout, with headroom still unprovable: stays
+    no_data, register untouched — same as if no watchdog existed at all."""
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=True,
+        current_kw=None,
+        target_kw=12.0,
+        seconds_since_last_nibe_contact=DEFAULT_WATCHDOG_TIMEOUT_S - 1,
+    )
+    assert d.status == "no_data"
+    assert d.heat_offset_c is None
+
+
+def test_watchdog_none_contact_behaves_like_fresh_contact():
+    """No confirmed contact yet since startup (None) must NOT be treated as
+    an infinitely-stale timeout — it's the normal state for the first tick
+    or two after this add-on starts, and must not falsely trigger the
+    watchdog before the pump has even been reached once."""
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=True,
+        current_kw=None,
+        target_kw=12.0,
+        seconds_since_last_nibe_contact=None,
+    )
+    assert d.status == "no_data"
+    assert d.heat_offset_c is None
+
+
+def test_watchdog_triggers_at_exactly_the_timeout():
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=True,
+        current_kw=None,
+        target_kw=12.0,
+        seconds_since_last_nibe_contact=DEFAULT_WATCHDOG_TIMEOUT_S,
+    )
+    assert d.status == "watchdog_reset"
+    assert d.heat_offset_c == 0
+
+
+def test_watchdog_does_not_affect_cycles_with_known_headroom():
+    """A huge seconds_since_last_nibe_contact must not matter at all once
+    headroom is actually provable (True or False) — the watchdog only
+    exists to cover the headroom-UNKNOWN branch, not to second-guess a
+    cycle that already has a real answer."""
+    huge_gap = DEFAULT_WATCHDOG_TIMEOUT_S * 100
+
+    d_has_headroom = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=True,
+        current_kw=5.0,
+        target_kw=12.0,
+        seconds_since_last_nibe_contact=huge_gap,
+    )
+    assert d_has_headroom.status == "engaged_cheap_price"
+    assert d_has_headroom.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
+
+    d_no_headroom = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=True,
+        current_kw=12.0,
+        target_kw=12.0,
+        seconds_since_last_nibe_contact=huge_gap,
+    )
+    assert d_no_headroom.status == "no_headroom"
+    assert d_no_headroom.heat_offset_c == 0
 
 
 # ---------------------------------------------------------------------------

@@ -112,6 +112,13 @@ DEFAULT_CHEAP_PRICE_PERCENTILE = 0.5  # cheaper half of today's known hours — 
 DEFAULT_MIN_SOLAR_SURPLUS_KW = 0.0
 DEFAULT_HEADROOM_MARGIN_KW = 0.0  # v1 scope: any positive headroom counts, no safety buffer beyond target_kw itself
 
+# Fas 4b (2026-09-24) — the watchdog controller.py's own docstring calls a
+# "hard requirement before this runs beyond demo mode". 15 minutes: long
+# enough that a normal transient (HA restart, brief network hiccup) never
+# trips it, short enough that a genuinely lost connection doesn't leave a
+# stuck curve-offset boost in place for the rest of a heating season.
+DEFAULT_WATCHDOG_TIMEOUT_S = 900
+
 # The register (number.heat_offset_s1_47011) allows -10..+10 in steps of 1,
 # but this module only ever asks for a small, conservative nudge — not the
 # full range a person adjusting the pump's own menu might use. +2 was
@@ -126,11 +133,12 @@ MAX_SAFE_HEAT_OFFSET_C = 2  # decision-layer ceiling; controller.py clamps again
 class HeatingBoostDecision:
     """Whether the space-heating curve-offset lever should be engaged this cycle.
 
-    status: "no_data" | "no_headroom" | "engaged_cheap_price" |
-        "engaged_solar_surplus" | "normal"
+    status: "no_data" | "watchdog_reset" | "no_headroom" |
+        "engaged_cheap_price" | "engaged_solar_surplus" | "normal"
     heat_offset_c: the value to write to number.heat_offset_s1_47011 —
-        DEFAULT_HEAT_OFFSET_BOOST_C while boosting, 0 for Normal, None
-        only for no_data (don't touch the register at all that cycle).
+        DEFAULT_HEAT_OFFSET_BOOST_C while boosting, 0 for Normal or
+        watchdog_reset, None only for no_data (don't touch the register at
+        all that cycle).
     """
 
     status: str
@@ -184,12 +192,21 @@ def decide_heating_boost(
     governor_enabled: bool,
     current_kw: float | None,
     target_kw: float | None,
+    seconds_since_last_nibe_contact: float | None = None,
     cheap_price_percentile: float = DEFAULT_CHEAP_PRICE_PERCENTILE,
     min_solar_surplus_kw: float = DEFAULT_MIN_SOLAR_SURPLUS_KW,
     headroom_margin_kw: float = DEFAULT_HEADROOM_MARGIN_KW,
     heat_offset_boost_c: int = DEFAULT_HEAT_OFFSET_BOOST_C,
+    watchdog_timeout_s: float = DEFAULT_WATCHDOG_TIMEOUT_S,
 ) -> HeatingBoostDecision:
-    """Pure decision for the space-heating curve-offset comfort-boost lever."""
+    """Pure decision for the space-heating curve-offset comfort-boost lever.
+
+    seconds_since_last_nibe_contact: how long since NibeController last
+        confirmed a successful read from the pump (its own
+        seconds_since_last_contact()), or None if no read has succeeded yet
+        since this add-on started. Only consulted in the headroom-unknown
+        branch below — see the watchdog note there for why.
+    """
     headroom = _headroom_available(
         governor_enabled=governor_enabled,
         current_kw=current_kw,
@@ -197,6 +214,35 @@ def decide_heating_boost(
         margin_kw=headroom_margin_kw,
     )
     if headroom is None:
+        # Watchdog (Fas 4b): headroom being unprovable is the one case a
+        # stuck non-zero offset can persist indefinitely (see
+        # controller.py's "NO FAIL-SAFE ON DISCONNECT"), because it's the
+        # only branch that can repeatedly return heat_offset_c=None
+        # ("don't touch the register") cycle after cycle. If the pump
+        # itself has also been unreachable for a long stretch — not just
+        # this cycle's headroom reading, but no confirmed contact at all
+        # — force the register back to neutral instead of leaving
+        # whatever it was last set to in place.
+        #
+        # seconds_since_last_nibe_contact is None right after startup
+        # (no read has succeeded yet) — deliberately NOT treated as a
+        # timeout, same "burden of proof" convention as the price/solar
+        # exceptions above: no evidence of a problem yet is not evidence
+        # of one.
+        if (
+            seconds_since_last_nibe_contact is not None
+            and seconds_since_last_nibe_contact >= watchdog_timeout_s
+        ):
+            return HeatingBoostDecision(
+                status="watchdog_reset",
+                heat_offset_c=0,
+                reason=(
+                    f"no confirmed contact with the pump for "
+                    f"{seconds_since_last_nibe_contact:.0f}s "
+                    f"(>= {watchdog_timeout_s:.0f}s) while headroom is "
+                    "unknown — forcing curve offset back to neutral"
+                ),
+            )
         return HeatingBoostDecision(
             status="no_data",
             heat_offset_c=None,

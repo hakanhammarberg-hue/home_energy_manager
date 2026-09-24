@@ -225,6 +225,38 @@ def _validate_managed_load_sensors(home_section: dict) -> None:
             )
 
 
+def _validate_fuse_current(home_section: dict) -> None:
+    """Raise HTTPException(422) for a Fuse Current outside (0, 200] amps.
+
+    Fas 4b (2026-09-24): added after a real incident where 220 (a voltage,
+    not an amperage) was saved as max_fuse_current — the field previously
+    had no upper bound at all (min: 1, no max) in HomeFormSection.tsx,
+    which both Settings and the install wizard share, so the same mistake
+    was possible from either entry point. 200A is deliberately generous —
+    real Swedish household main fuses rarely exceed 63A — this is a
+    guard against an obvious typo/unit mix-up, not a realistic ceiling.
+    Mirrors the frontend gating in HomeFormSection.tsx (now max: 200) —
+    this is the server-side backstop so the API refuses the value
+    regardless of which client sent it.
+    """
+    max_fuse_current = home_section.get("max_fuse_current")
+    if max_fuse_current is None:
+        return
+    if (
+        not isinstance(max_fuse_current, (int, float))
+        or isinstance(max_fuse_current, bool)
+        or not (0 < max_fuse_current <= 200)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"home.max_fuse_current must be between 0 and 200 amps "
+                f"(got {max_fuse_current!r}) — check you entered an "
+                "amperage, not a voltage."
+            ),
+        )
+
+
 def _require_configured_system(bess_controller) -> None:
     """Raise HTTP 503 if the BESS system has not been configured yet.
 
@@ -389,6 +421,28 @@ async def patch_settings(updates: dict):
                         detail="governor.target_kw must be a positive number",
                     )
 
+            if store_key == "nibe":
+                percentile = snake_data.get("cheap_price_percentile")
+                if percentile is not None and (
+                    not isinstance(percentile, (int, float))
+                    or isinstance(percentile, bool)
+                    or not (0 <= percentile <= 1)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.cheap_price_percentile must be between 0 and 1",
+                    )
+                min_solar = snake_data.get("min_solar_surplus_kw")
+                if min_solar is not None and (
+                    not isinstance(min_solar, (int, float))
+                    or isinstance(min_solar, bool)
+                    or min_solar < 0
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.min_solar_surplus_kw must be zero or greater",
+                    )
+
             if store_key == "ev_scheduler":
                 soc_cap = snake_data.get("soc_cap_percent")
                 if soc_cap is not None and (
@@ -444,6 +498,7 @@ async def patch_settings(updates: dict):
                 _validate_power_monitoring_sensors(section, effective_sensors)
                 _validate_consumption_strategy(section, effective_sensors)
                 _validate_managed_load_sensors(section)
+                _validate_fuse_current(section)
 
             if store_key == "sensors":
                 # A sensor removal (e.g. unmapping a phase-current sensor) can
@@ -3230,6 +3285,7 @@ async def setup_complete(payload: APISetupCompletePayload):
             _validate_power_monitoring_sensors(home, effective_sensors)
             _validate_consumption_strategy(home, effective_sensors)
             _validate_managed_load_sensors(home)
+            _validate_fuse_current(home)
             sections["home"] = home
 
         # --- electricity price ---
