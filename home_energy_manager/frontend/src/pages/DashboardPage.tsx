@@ -10,6 +10,7 @@ import PerificPowerCard from '../components/PerificPowerCard';
 import GovernorStatusCard from '../components/GovernorStatusCard';
 import EvSchedulerStatusCard from '../components/EvSchedulerStatusCard';
 import NibeStatusCard from '../components/NibeStatusCard';
+import NibeHistoryCharts from '../components/NibeHistoryCharts';
 import BatterySocRangeCard from '../components/BatterySocRangeCard';
 import InverterWriteAccessCard from '../components/InverterWriteAccessCard';
 import AlertBanner from '../components/AlertBanner';
@@ -426,6 +427,9 @@ export default function DashboardPage({
             <div>
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Nibe</h2>
               <NibeStatusCard />
+              <div className="mt-6">
+                <NibeHistoryCharts />
+              </div>
             </div>
           </div>
 
