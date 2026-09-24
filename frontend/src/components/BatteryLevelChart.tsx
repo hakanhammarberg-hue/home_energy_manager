@@ -1,0 +1,408 @@
+import React, { useState, useEffect } from 'react';
+import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, ComposedChart, Area } from 'recharts';
+import { HourlyData } from '../types';
+import { periodToTimeString, periodToTimeRange } from '../utils/timeUtils';
+import { DataResolution } from '../hooks/useUserPreferences';
+
+interface BatteryLevelChartProps {
+  hourlyData: HourlyData[];
+  tomorrowData?: HourlyData[] | null;
+  settings: any; // Adjust type as needed
+  resolution: DataResolution;
+}
+
+export const BatteryLevelChart: React.FC<BatteryLevelChartProps> = ({ hourlyData, tomorrowData, resolution }) => {
+  // Reactive dark mode detection — observes class changes on <html> to match Tailwind's 'class' strategy
+  const [isDarkMode, setIsDarkMode] = useState(
+    document.documentElement.classList.contains('dark')
+  );
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setIsDarkMode(document.documentElement.classList.contains('dark'));
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
+
+  const colors = {
+    grid: isDarkMode ? '#374151' : '#e5e7eb',
+    text: isDarkMode ? '#9CA3AF' : '#374151',
+    background: isDarkMode ? '#1f2937' : '#ffffff',
+    tooltip: isDarkMode ? '#374151' : '#ffffff',
+    tooltipBorder: isDarkMode ? '#4b5563' : '#d1d5db',
+    soc: '#16a34a',
+    solarCharging: '#fbbf24',
+    gridCharging: '#3b82f6',
+    homeDischarging: '#dc2626',
+    gridDischarging: '#1d4ed8'
+  };
+
+  // Extract values from FormattedValue objects or fallback to raw numbers
+  const getValue = (field: any) => {
+    if (typeof field === 'object' && field?.value !== undefined) {
+      return field.value;
+    }
+    return field || 0;
+  };
+
+  // Transform daily view data to chart format
+  const chartData = hourlyData.map((hour, index) => {
+    // Check for missing keys and provide warnings
+    if (hour.batteryAction === undefined) {
+      console.warn(`Missing key: batteryAction at index ${index}`);
+    }
+    if (hour.batterySocEnd === undefined) {
+      console.warn(`Missing key: batterySocEnd at index ${index}`);
+    }
+    if (hour.buyPrice === undefined) {
+      console.warn(`Missing key: buyPrice at index ${index}`);
+    }
+    if (hour.dataSource === undefined) {
+      console.warn(`Missing key: dataSource at index ${index}`);
+    }
+
+    if (hour.batteryAction === undefined) {
+      throw new Error(`MISSING DATA: batteryAction is required but missing at index ${index}`);
+    }
+    const batteryAction = getValue(hour.batteryAction);
+    const solarToBattery = getValue(hour.solarToBattery);
+    const gridToBattery = getValue(hour.gridToBattery);
+    const batteryToHome = getValue(hour.batteryToHome);
+    const batteryToGrid = getValue(hour.batteryToGrid);
+    const rawSoc = getValue(hour.batterySocEnd);
+    const isActual = hour.dataSource === 'actual';
+    // Treat zero SOC on predicted periods as missing data to avoid flat 0% lines
+    const batterySocPercent = (rawSoc === 0 && !isActual) ? null : rawSoc;
+    const rawPrice = getValue(hour.buyPrice);
+    const price = rawPrice || null; // Treat zero/missing price as null for visual gaps
+    const periodNum = hour.period ?? index;
+    if (hour.dataSource === undefined) {
+      throw new Error(`MISSING DATA: dataSource is required but missing at index ${index}`);
+    }
+    const dataSource = hour.dataSource;
+
+    // Period END positioning: matches EnergyFlowChart convention
+    let xPosition: number;
+    if (resolution === 'quarter-hourly') {
+      xPosition = (periodNum + 1) / 4;
+    } else {
+      xPosition = periodNum + 1;
+    }
+
+    return {
+      hour: xPosition,
+      periodNum,
+      hourLabel: periodToTimeString(periodNum, resolution),
+      batterySocPercent: batterySocPercent,
+      action: batteryAction,
+      solarCharging: solarToBattery,
+      gridCharging: gridToBattery,
+      homeDischarging: batteryToHome > 0 ? -batteryToHome : 0,
+      gridDischarging: batteryToGrid > 0 ? -batteryToGrid : 0,
+      price: price,
+      dataSource: dataSource,
+      isActual: dataSource === 'actual',
+      isPredicted: dataSource === 'predicted',
+      isTomorrow: false,
+      // Include FormattedValue objects for tooltip
+      batterySocEndFormatted: hour.batterySocEnd,
+      batteryActionFormatted: hour.batteryAction,
+      buyPriceFormatted: hour.buyPrice,
+      solarToBatteryFormatted: hour.solarToBattery,
+      gridToBatteryFormatted: hour.gridToBattery,
+      batteryToHomeFormatted: hour.batteryToHome,
+      batteryToGridFormatted: hour.batteryToGrid
+    };
+  });
+
+  // Zero anchor at x=0: gives stepBefore a left edge so bars render from 0→1 for period 0
+  chartData.unshift({ hour: 0, periodNum: -1, hourLabel: '', batterySocPercent: chartData[0]?.batterySocPercent ?? 0, action: 0, solarCharging: 0, gridCharging: 0, homeDischarging: 0, gridDischarging: 0, price: chartData[0]?.price ?? 0, dataSource: 'actual', isActual: true, isPredicted: false, isTomorrow: false, batterySocEndFormatted: chartData[0]?.batterySocEndFormatted, batteryActionFormatted: chartData[0]?.batteryActionFormatted, buyPriceFormatted: chartData[0]?.buyPriceFormatted, solarToBatteryFormatted: chartData[0]?.solarToBatteryFormatted, gridToBatteryFormatted: chartData[0]?.gridToBatteryFormatted, batteryToHomeFormatted: chartData[0]?.batteryToHomeFormatted, batteryToGridFormatted: chartData[0]?.batteryToGridFormatted });
+
+  // Append tomorrow's data with hour offset 24+
+  const hasTomorrowData = tomorrowData && tomorrowData.length > 0;
+  if (hasTomorrowData) {
+    for (const [idx, hour] of tomorrowData.entries()) {
+      if (hour.batteryAction === undefined) {
+        console.warn(`Missing key: batteryAction in tomorrow data at index ${idx}`);
+        continue;
+      }
+      const batteryAction = getValue(hour.batteryAction);
+      const solarToBattery = getValue(hour.solarToBattery);
+      const gridToBattery = getValue(hour.gridToBattery);
+      const batteryToHome = getValue(hour.batteryToHome);
+      const batteryToGrid = getValue(hour.batteryToGrid);
+      const rawSocTmrw = getValue(hour.batterySocEnd);
+      const batterySocPercent = rawSocTmrw === 0 ? null : rawSocTmrw;
+      const rawPriceTmrw = getValue(hour.buyPrice);
+      const price = rawPriceTmrw || null;
+      // Normalize period numbers: API may return 96-191 (continuation from today) or 0-95
+      const rawPeriodNum = hour.period ?? idx;
+      const tomorrowPeriodsPerDay = resolution === 'quarter-hourly' ? 96 : 24;
+      const periodNum = rawPeriodNum >= tomorrowPeriodsPerDay ? rawPeriodNum - tomorrowPeriodsPerDay : rawPeriodNum;
+      const dataSource = hour.dataSource ?? 'predicted';
+
+      let xPosition: number;
+      if (resolution === 'quarter-hourly') {
+        xPosition = 24 + (periodNum + 1) / 4;
+      } else {
+        xPosition = 24 + periodNum + 1;
+      }
+
+      chartData.push({
+        hour: xPosition,
+        periodNum,
+        hourLabel: periodToTimeString(periodNum, resolution),
+        batterySocPercent,
+        action: batteryAction,
+        solarCharging: solarToBattery,
+        gridCharging: gridToBattery,
+        homeDischarging: batteryToHome > 0 ? -batteryToHome : 0,
+        gridDischarging: batteryToGrid > 0 ? -batteryToGrid : 0,
+        price,
+        dataSource,
+        isActual: false,
+        isPredicted: true,
+        isTomorrow: true,
+        batterySocEndFormatted: hour.batterySocEnd,
+        batteryActionFormatted: hour.batteryAction,
+        buyPriceFormatted: hour.buyPrice,
+        solarToBatteryFormatted: hour.solarToBattery,
+        gridToBatteryFormatted: hour.gridToBattery,
+        batteryToHomeFormatted: hour.batteryToHome,
+        batteryToGridFormatted: hour.batteryToGrid
+      });
+    }
+  }
+
+  // Period 23 is at x=24 (period END), so today-only maxHour is naturally 24
+  const maxHourValue = hasTomorrowData
+    ? Math.ceil(Math.max(...chartData.map(d => d.hour)))
+    : 24;
+  const xAxisTicks = Array.from({ length: maxHourValue + 1 }, (_, i) => i);
+
+  // Find predicted hours range for today (same logic as EnergyFlowChart)
+  const firstPredictedIdx = chartData.findIndex(d => !d.isActual && !d.isTomorrow);
+  const lastTodayIdx = chartData.findIndex(d => d.isTomorrow);
+  const firstPredictedHour = firstPredictedIdx > -1 ? chartData[firstPredictedIdx].hour : null;
+  const lastTodayHour = lastTodayIdx > -1 ? chartData[lastTodayIdx - 1]?.hour : maxHourValue;
+
+  const maxAction = Math.max(
+    ...chartData.map(d => (d.solarCharging || 0) + (d.gridCharging || 0)),
+    ...chartData.map(d => Math.abs((d.homeDischarging || 0) + (d.gridDischarging || 0))),
+    1
+  );
+
+  return (
+    <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+      <div className="h-80">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={chartData} margin={{ top: 5, right: 5, left: 5, bottom: 5 }}>
+            <CartesianGrid stroke={colors.grid} strokeOpacity={isDarkMode ? 0.12 : 0.3} strokeWidth={0.5} />
+            <XAxis
+              dataKey="hour"
+              interval={0}
+              tick={{ fill: colors.text, fontSize: 12 }}
+              axisLine={{ stroke: colors.text }}
+              tickLine={{ stroke: colors.text }}
+              ticks={xAxisTicks}
+              tickFormatter={(value: number) => {
+                return `${(Math.floor(value) % 24).toString().padStart(2, '0')}`;
+              }}
+            />
+            
+            {/* Left Y-axis for Battery SOC (%) */}
+            <YAxis
+              yAxisId="left"
+              width={60}
+              stroke={colors.text}
+              domain={[0, 100]}
+              tick={{ fill: colors.text, fontSize: 12 }}
+              tickFormatter={(value) => `${Math.round(value)}%`}
+              label={{
+                value: 'Battery SOC (%)',
+                angle: -90,
+                position: 'insideLeft',
+                style: { textAnchor: 'middle', dominantBaseline: 'central', fill: colors.text }
+              }}
+            />
+
+            {/* Right Y-axis for Battery Actions (kWh) */}
+            <YAxis
+              yAxisId="action"
+              orientation="right"
+              width={60}
+              stroke={colors.text}
+              domain={[-maxAction * 1.2, maxAction * 1.2]}
+              tick={{ fill: colors.text, fontSize: 12 }}
+              tickFormatter={(value) => value.toLocaleString('sv-SE', {minimumFractionDigits: 1, maximumFractionDigits: 1})}
+              label={{
+                value: 'Battery Flow (kWh)',
+                angle: 90,
+                position: 'outside',
+                offset: 40,
+                style: { textAnchor: 'middle', dominantBaseline: 'central', fill: colors.text }
+              }}
+            />
+            
+            <Tooltip
+              content={({ active, payload }) => {
+                if (!active || !payload?.length) return null;
+                const data = payload[0].payload;
+                if (data.periodNum === -1) return null;
+                const timeRange = periodToTimeRange(data.periodNum, resolution);
+                const label = data.isTomorrow ? `Tomorrow ${timeRange}` : timeRange;
+                return (
+                  <div style={{ backgroundColor: colors.tooltip, border: `1px solid ${colors.tooltipBorder}`, borderRadius: '8px', padding: '10px', color: colors.text }}>
+                    <p style={{ fontWeight: 'bold', marginBottom: 4 }}>{label}</p>
+                    <p style={{ color: colors.soc }}>Battery SOC : {data.batterySocEndFormatted?.text ?? `${data.batterySocPercent} %`}</p>
+                    <p style={{ color: '#9CA3AF' }}>Electricity Price : {data.buyPriceFormatted?.text ?? `${data.price}`}</p>
+                    {data.solarCharging > 0 && <p style={{ color: colors.solarCharging }}>Solar → Battery : {data.solarToBatteryFormatted?.text ?? `${data.solarCharging}`}</p>}
+                    {data.gridCharging > 0 && <p style={{ color: colors.gridCharging }}>Grid → Battery : {data.gridToBatteryFormatted?.text ?? `${data.gridCharging}`}</p>}
+                    {data.homeDischarging < 0 && <p style={{ color: colors.homeDischarging }}>Battery → Home : {data.batteryToHomeFormatted?.text ?? `${-data.homeDischarging}`}</p>}
+                    {data.gridDischarging < 0 && <p style={{ color: colors.gridDischarging }}>Battery → Grid : {data.batteryToGridFormatted?.text ?? `${-data.gridDischarging}`}</p>}
+                  </div>
+                );
+              }}
+            />
+            
+            <ReferenceLine yAxisId="action" y={0} stroke={colors.grid} />
+
+            {/* Hourly vertical grid lines - extend for tomorrow data */}
+            {Array.from({ length: maxHourValue + 1 }, (_, i) => (
+              <ReferenceLine
+                key={`hour-${i}`}
+                x={i}
+                yAxisId="left"
+                stroke={colors.grid}
+                strokeOpacity={isDarkMode ? 0.12 : 0.3}
+                strokeWidth={0.5}
+              />
+            ))}
+
+            {/* Overlay for predicted hours (today only) */}
+            {firstPredictedHour !== null && (
+              <ReferenceArea
+                yAxisId="left"
+                x1={firstPredictedHour}
+                x2={lastTodayHour}
+                fill={isDarkMode ? 'rgba(120,120,120,0.12)' : 'rgba(120,120,120,0.10)'}
+                ifOverflow="hidden"
+              />
+            )}
+
+            {/* Grey background for tomorrow's data */}
+            {hasTomorrowData && (
+              <ReferenceArea
+                yAxisId="left"
+                x1={24}
+                x2={maxHourValue}
+                fill={isDarkMode ? 'rgba(120,120,120,0.12)' : 'rgba(120,120,120,0.08)'}
+              />
+            )}
+
+            {/* Today/tomorrow divider */}
+            {hasTomorrowData && (
+              <ReferenceLine
+                x={24}
+                yAxisId="left"
+                stroke="#9CA3AF"
+                strokeWidth={0.5}
+                strokeOpacity={0.4}
+                label={{ value: 'Tomorrow', position: 'insideTopRight', fontSize: 11, fill: '#9CA3AF', fillOpacity: 0.4 }}
+              />
+            )}
+
+            <Area
+              yAxisId="left"
+              type="monotone"
+              dataKey="batterySocPercent"
+              stroke={colors.soc}
+              strokeWidth={2}
+              fill={colors.soc}
+              fillOpacity={0.1}
+              name="Battery SOC"
+            />
+
+            <Area
+              yAxisId="action"
+              type="stepBefore"
+              dataKey="solarCharging"
+              stackId="charge"
+              stroke={colors.solarCharging}
+              strokeWidth={1}
+              fill={colors.solarCharging}
+              fillOpacity={0.7}
+              name="Solar → Battery"
+              dot={false}
+              connectNulls={false}
+            />
+            <Area
+              yAxisId="action"
+              type="stepBefore"
+              dataKey="gridCharging"
+              stackId="charge"
+              stroke={colors.gridCharging}
+              strokeWidth={1}
+              fill={colors.gridCharging}
+              fillOpacity={0.7}
+              name="Grid → Battery"
+              dot={false}
+              connectNulls={false}
+            />
+            <Area
+              yAxisId="action"
+              type="stepBefore"
+              dataKey="homeDischarging"
+              stackId="discharge"
+              stroke={colors.homeDischarging}
+              strokeWidth={1}
+              fill={colors.homeDischarging}
+              fillOpacity={0.7}
+              name="Battery → Home"
+              dot={false}
+              connectNulls={false}
+            />
+            <Area
+              yAxisId="action"
+              type="stepBefore"
+              dataKey="gridDischarging"
+              stackId="discharge"
+              stroke={colors.gridDischarging}
+              strokeWidth={1}
+              fill={colors.gridDischarging}
+              fillOpacity={0.7}
+              name="Battery → Grid"
+              dot={false}
+              connectNulls={false}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Custom Legend */}
+      <div className="flex flex-wrap justify-center gap-6 mt-1 text-sm">
+        <div className="flex items-center">
+          <div className="w-4 h-3 rounded mr-2" style={{ backgroundColor: colors.soc }}></div>
+          <span className="text-gray-700 dark:text-gray-300">Battery SOC</span>
+        </div>
+        <div className="flex items-center">
+          <div className="w-4 h-3 rounded mr-2" style={{ backgroundColor: colors.solarCharging }}></div>
+          <span className="text-gray-700 dark:text-gray-300">Solar → Battery</span>
+        </div>
+        <div className="flex items-center">
+          <div className="w-4 h-3 rounded mr-2" style={{ backgroundColor: colors.gridCharging }}></div>
+          <span className="text-gray-700 dark:text-gray-300">Grid → Battery</span>
+        </div>
+        <div className="flex items-center">
+          <div className="w-4 h-3 rounded mr-2" style={{ backgroundColor: colors.homeDischarging }}></div>
+          <span className="text-gray-700 dark:text-gray-300">Battery → Home</span>
+        </div>
+        <div className="flex items-center">
+          <div className="w-4 h-3 rounded mr-2" style={{ backgroundColor: colors.gridDischarging }}></div>
+          <span className="text-gray-700 dark:text-gray-300">Battery → Grid</span>
+        </div>
+      </div>
+    </div>
+  );
+};

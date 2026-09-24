@@ -1,0 +1,1100 @@
+# Changelog
+
+All notable changes to BESS Battery Manager will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- **Tell BESS what consumption is coming with Planned Consumption Changes** — declare an EV session or a skipped pool pump in a template sensor, and it applies on top of whichever consumption forecast you already use. ([#428](https://github.com/johanzander/bess-manager/issues/428))
+- **Managed Loads — exclude a regular habit like EV charging from the `ha_statistics` baseline** — name the load's own cumulative energy sensor and BESS learns your normal usage without it, so you can announce it separately via Planned Consumption Changes. ([#706](https://github.com/johanzander/bess-manager/issues/706))
+
+### Fixed
+
+- **Huawei inverters can be configured manually** when auto-discovery finds no Huawei integration, and setup now requires the battery Device ID that `huawei_solar.set_tou_periods` targets — completing without one used to leave every schedule write failing. The LUNA2000 working-mode select is now optional, so EMMA-fronted installs that don't expose it can finish setup. ([#120](https://github.com/johanzander/bess-manager/issues/120))
+- **Huawei EMMA schedules accept its translated `Time Of Use` working mode** — the working-mode gate matches TOU options case- and separator-insensitively instead of requiring the exact stock `time_of_use_luna2000` label, while still failing loudly on a non-empty option list with no TOU equivalent (e.g. LG RESU). ([#120](https://github.com/johanzander/bess-manager/issues/120))
+- **Huawei discharge-stop SOC writes now target the battery discharge cutoff control** (`storage_discharging_cutoff_capacity`) rather than the unrelated grid-charge cutoff; a schema migration clears the stale mapping on existing installs so a wizard re-scan repoints it. ([#120](https://github.com/johanzander/bess-manager/issues/120))
+- **The add-on no longer runs out of memory and stops restarting when the optimizer refines a near-tied decision** — the exact re-solve now runs within a bounded memory footprint. ([#697](https://github.com/johanzander/bess-manager/issues/697))
+- **The battery now keeps a sensible overnight reserve instead of all-or-nothing** — end-of-horizon energy is valued by how much the house needs before sunrise, so midnight charge no longer flips between empty and full. ([#602](https://github.com/johanzander/bess-manager/issues/602))
+- **Sub-period discharge authorization now values stored energy accurately** — the gate read the battery's marginal value from a single grid cell, which mis-priced it in both directions, so it both held and released the battery in the wrong periods. ([#683](https://github.com/johanzander/bess-manager/issues/683))
+- **The daily log no longer balloons to multiple megabytes** — the schedule and optimization tables are now logged only when the battery schedule actually changes, not re-dumped verbatim every 15-minute cycle. ([#701](https://github.com/johanzander/bess-manager/pull/701))
+- **The dashboard banner reports one line per affected device instead of one per component** — a single device outage previously lit up the banner with separate lines for Battery Control, Battery Monitoring and Energy Monitoring (and one recovery line per component afterwards); all now collapse to one device line, with per-sensor detail still on the System Health page. ([#701](https://github.com/johanzander/bess-manager/pull/701))
+
+## [10.1.0] - 2026-08-22
+
+### Added
+
+- **Optional PV export-limit curtailment on negative sell prices** — when enabled and a period is exporting at a sell price below a configurable floor, Growatt GEN2/GEN3/GEN4 hardware (via solax_modbus, with a grid CT/smart meter) now throttles PV production at the panel instead of paying to export. Off by default. ([#269](https://github.com/johanzander/bess-manager/issues/269))
+- **Inverter service domain is now configurable** — a compatible integration exposing the same TOU services under its own domain works as a setting instead of needing a new BESS platform. ([#412](https://github.com/johanzander/bess-manager/pull/412))
+- **Grid connection import capacity modeling** — the DP now caps planned grid import at the house's fuse limit instead of planning unbounded imports, gated on `power_monitoring_enabled`. ([#429](https://github.com/johanzander/bess-manager/issues/429))
+- **Solis inverter platform (`solis_modbus`) is now stable** — confirmed working against real Solis installations by two beta testers, no longer marked experimental. ([#130](https://github.com/johanzander/bess-manager/issues/130))
+- **ENTSO-e / Belpex price provider is now stable** — confirmed working against a real Belgian Belpex/Luminus Dynamic contract over an extended live-test period, no longer marked experimental. ([#126](https://github.com/johanzander/bess-manager/issues/126))
+
+### Changed
+
+- **Huawei LUNA2000 no longer rewrites TOU periods the battery already holds** — BESS reads the programmed periods back and skips the write when they match, sparing needless flash wear. ([#431](https://github.com/johanzander/bess-manager/issues/431))
+- **Finer battery optimization grid** — the DP's state/action resolution is halved (0.1 kW / 0.025 kWh), recovering 2.43 SEK/day of savings across the benchmark corpus while reducing solve time. ([#512](https://github.com/johanzander/bess-manager/issues/512))
+- **Debug bundles are several times smaller** — prediction snapshots now record only the periods whose plan changed, in a compact encoding, instead of rewriting the whole forecast each run. ([#555](https://github.com/johanzander/bess-manager/issues/555))
+
+### Fixed
+
+- **A transient Home Assistant outage no longer kills the 5-minute charging-power adjustment** — the tick now skips and keeps the inverter's current rate instead of crashing. ([#643](https://github.com/johanzander/bess-manager/issues/643))
+- **Export Compensation can now be set to a negative value** — needed when a grid operator charges for export instead of paying for it; the field silently allowed only non-negative values. ([#666](https://github.com/johanzander/bess-manager/issues/666))
+- **A brief Nordpool hiccup no longer produces a daily "recovered from an earlier issue" notice** — the health check re-fetched today's prices every five minutes instead of using the ones already held. ([#662](https://github.com/johanzander/bess-manager/issues/662))
+- **Growatt VPP now lets the inverter and BMS sleep through a long idle at minimum SoC** — an empty battery was still held under continuous remote control, which nothing was protecting. ([#592](https://github.com/johanzander/bess-manager/issues/592))
+- **A tiny solar surplus is no longer planned as an export the inverter will absorb** — below the export the plan can express, the battery charged anyway and ran fuller than planned, spilling the difference later. ([#630](https://github.com/johanzander/bess-manager/issues/630))
+- **The setup wizard no longer locks you out of an inverter platform it failed to auto-detect** — every platform stays selectable, and a re-scan keeps the one you picked. ([#621](https://github.com/johanzander/bess-manager/issues/621))
+- **System no longer gets stuck on "initializing" when many consecutive periods are near-tied** — a long run of volatile prices could make every hourly optimization fail, leaving no schedule at all. ([#624](https://github.com/johanzander/bess-manager/issues/624))
+- **Grid charging now reaches the planned amount instead of stopping just short** — the charge rate is written as a whole percent, and rounding it down meant the battery charged slightly less than the plan counted on.
+- **Growatt VPP no longer briefly executes the previous period's power command when switching modes** — enabling remote control commits immediately, so the power target is now written before it, and cleared on release. ([#593](https://github.com/johanzander/bess-manager/issues/593))
+- **The battery now covers house load exactly instead of exporting a few Wh and committing the inverter** — a period whose load fell between two discharge steps was planned as a small export, which forces `grid_first` at a fixed rate and imports any load spike. ([#352](https://github.com/johanzander/bess-manager/issues/352))
+- **Huawei, native SolaX and Solis installs no longer report a discharge as negative charging, or an export as negative import** — the signed battery/grid sensor split now works on settings saved before the sensor pairing existed, with no wizard re-run. ([#604](https://github.com/johanzander/bess-manager/issues/604))
+- **The battery schedule no longer varies between otherwise identical runs** — when two plans were worth exactly the same, the optimizer picked between them on floating-point noise, so the same day could plan differently on different machines. ([#606](https://github.com/johanzander/bess-manager/issues/606))
+- **Growatt MIN TOU segments are now written to the inverter only once they are about to take effect**, roughly halving inverter writes: a segment hours away no longer gets rewritten every time the plan shifts around a marginal period. ([#554](https://github.com/johanzander/bess-manager/issues/554))
+- **A running Growatt MIN TOU segment's end is no longer rewritten hours before the change matters** — nudging a live window's end waited on nothing, so it was written immediately even when the difference was hours away. ([#589](https://github.com/johanzander/bess-manager/issues/589))
+- **A running Growatt MIN TOU segment is no longer rewritten every 15 minutes** — its start time was being truncated forward each cycle, so an unchanged two-hour window cost 16 inverter writes instead of 2. ([#554](https://github.com/johanzander/bess-manager/issues/554))
+- **A temporary Nordpool outage no longer tells you to fix your configuration** — the health check now reports the price source as temporarily unavailable, and the expected daily "tomorrow's prices not published yet" call no longer counts as a runtime failure. ([#583](https://github.com/johanzander/bess-manager/issues/583))
+- **SolaX (native), Solis, Huawei and Growatt SPH no longer get a plan their hardware can't deliver** — the optimizer's exact-load-cover action assumes the inverter throttles a discharge to the real house load; it is now offered only on platforms that actually do that. Growatt (cloud and solax_modbus, both control modes) is unaffected. ([#580](https://github.com/johanzander/bess-manager/issues/580))
+- **Huawei solar production now comes from the PV input counter instead of the inverter's AC yield**, which rose while the battery discharged — inflating reported house consumption and total savings. ([#569](https://github.com/johanzander/bess-manager/issues/569))
+- **Reported lifetime house consumption is now correct on SolaX, Solis and Huawei**, which have no load register — it previously overstated load by the battery's lifetime net charge. ([#528](https://github.com/johanzander/bess-manager/issues/528))
+- **A missing consumption sensor no longer leaves the dashboard stuck on "Initializing"** — with the `sensor` strategy selected and no `48h_avg_grid_import` entity, the health check now reports a critical error, that strategy can't be selected without its sensor, and new installs default to `fixed`. ([#558](https://github.com/johanzander/bess-manager/issues/558))
+- **The setup wizard no longer completes with a configuration that cannot work** — it now blocks on inverter sensors whose Home Assistant entity is disabled (naming them so you can enable them) and on a price provider that isn't configured, instead of reporting "SYSTEM DEGRADED" afterwards. ([#549](https://github.com/johanzander/bess-manager/issues/549))
+- **Growatt MIN TOU segments are now written against the inverter's real state**, ending repeated "500 Server Error" write failures and leaving no unplanned segments running on the battery. ([#551](https://github.com/johanzander/bess-manager/issues/551))
+- **House load spikes during a battery-supported period are now covered from the battery instead of the grid**, on TOU/register platforms, whenever the stored energy is worth less than importing at that moment (`buy_price × discharge_efficiency ≥ shadow_price`, decided by the optimizer). When the battery is genuinely being reserved for a pricier later period the reserve is still protected and the spike is imported. ([#520](https://github.com/johanzander/bess-manager/issues/520))
+- Near-tied battery decisions now prefer the fullest load-covering discharge even when the tie surfaces at a partial cover, closing a gap where residual import stayed exposed to consumption spikes. ([#512](https://github.com/johanzander/bess-manager/issues/512))
+- **Sub-period battery discharge is no longer permitted on an uncomputed value** — the ceiling opened whenever the battery sat at its reserve floor, where no marginal value exists. ([#526](https://github.com/johanzander/bess-manager/issues/526))
+- **Isolated periods no longer import from a battery with charge to spare** — the discharge gate priced stored energy from the wrong point on its value curve, occasionally holding for one period while the periods either side discharged. ([#571](https://github.com/johanzander/bess-manager/issues/571))
+- Health checks for Battery Control, Battery Monitoring, and Energy Monitoring now report ERROR instead of OK when a required sensor is entirely unmapped, not just when it's unavailable.
+- Huawei TOU writes no longer fail on installs with no working-mode select (e.g. behind an EMMA energy manager); the health check reports this explicitly. ([#412](https://github.com/johanzander/bess-manager/pull/412))
+- Editing the Huawei battery Device ID in Settings now saves to the inverter section and applies without a restart, instead of being written to the Growatt section.
+- The Savings chart's bars could flicker invisible in Safari, especially with many thin bars (e.g. quarter-hourly resolution) — Safari fails to reliably anti-alias sub-pixel-width SVG shapes. Bars now use a fixed minimum width so they stay visible regardless of window size.
+- Growatt VPP-mode IDLE periods no longer drain the battery for house self-consumption overnight — IDLE now holds the battery via `battery_first` instead of falling back to native self-use. ([#466](https://github.com/johanzander/bess-manager/issues/466))
+- Near-tied IDLE vs battery-powering decisions now resolve to powering the house (fail-safe when consumption exceeds forecast) instead of IDLE, which hard-disables discharge at the inverter. Deliberate energy-holding periods (genuine arbitrage) are unaffected. ([#466](https://github.com/johanzander/bess-manager/issues/466))
+- Sunrise and sunset periods where solar nearly covers the house no longer sit IDLE and import the small remainder from the grid — the battery now serves it. ([#466](https://github.com/johanzander/bess-manager/issues/466))
+- Huawei LUNA2000 installs now auto-discover lifetime solar/battery energy sensors, fixing a false "SYSTEM DEGRADED" health check and zero-valued savings graphs. ([#471](https://github.com/johanzander/bess-manager/issues/471))
+- **Local E2E verification for Growatt VPP scenarios now completes a full schedule build** instead of failing partway through. ([#469](https://github.com/johanzander/bess-manager/issues/469))
+- **Predicted savings no longer include export revenue the inverter cannot earn** — the optimizer stopped planning discharges the hardware would silently throttle, so predicted and actual results now agree. ([#497](https://github.com/johanzander/bess-manager/issues/497))
+- Solis installs now auto-configure grid export power, derived from the same signed sensor as import power. Previously export power was always unconfigured. ([#475](https://github.com/johanzander/bess-manager/issues/475))
+- **Native SolaX and Huawei installs now auto-configure battery discharge power**, derived from the same signed sensor as charge power, instead of needing hand-built template sensors. ([#542](https://github.com/johanzander/bess-manager/issues/542))
+- **Phase current sensors on a Huawei smart meter are now auto-detected** — meter-side `Phase A/B/C current` naming is recognised alongside `current_l1/l2/l3`, so fuse protection no longer needs manual entry. ([#120](https://github.com/johanzander/bess-manager/issues/120))
+- **Phase currents are now always taken from a single device** — a sub-circuit meter (heat pump, EV charger) could supply some phases and the grid meter the rest, giving a house current measured at no one point. The house feed is preferred over a sub-circuit, and a complete three-phase set over a partial one. ([#120](https://github.com/johanzander/bess-manager/issues/120))
+- Huawei LUNA2000 installs now auto-discover all sensors (SOC, battery control, power monitoring) instead of requiring manual entity entry for every field, and gain real-time solar/grid power monitoring. ([#438](https://github.com/johanzander/bess-manager/issues/438))
+- **Growatt VPP Remote Control no longer keeps overriding the inverter after switching away from VPP mode** — switching control mode to TOU, or switching to a different inverter platform entirely, now disables the VPP override automatically. ([#479](https://github.com/johanzander/bess-manager/issues/479))
+- **Dashboard timeline no longer shows a stale intent (e.g. "Selling to Grid") for an elapsed hour that actually executed differently** — the color bar now always reflects true per-quarter data. ([#486](https://github.com/johanzander/bess-manager/issues/486))
+- **Near-tied grid-DP decisions could resolve to a suboptimal schedule** — those windows are now re-solved exactly with a windowed piecewise-linear solver instead of relying on the fast DP's approximation alone. ([#450](https://github.com/johanzander/bess-manager/issues/450))
+- The schedule table showed SOLAR_STORAGE/GRID_CHARGING/LOAD_SUPPORT labels with the kWh amount hidden as "--" for small-but-real periods (0.01–0.1 kWh) — the frontend's display threshold is now aligned with the backend's classification threshold. ([#484](https://github.com/johanzander/bess-manager/issues/484))
+- **Power monitoring could be enabled without the phase-current sensors it needs, crash-looping the schedule updater while the health check reported "OK"** — enabling it now requires those sensors to be mapped, at the settings UI, setup wizard, and API layers, and the health check flags the gap if it occurs anyway. ([#492](https://github.com/johanzander/bess-manager/issues/492))
+- Dashboard could crash with "Minified React error #310" during a background data refresh — the timeline's tooltip state hook was declared after two conditional early returns, changing the number of hooks called between renders.
+- **Planned PV curtailment is now shown as "Curtailed"** across the dashboard's schedule, timeline, and status views, instead of looking like a profitable Solar Export. ([#501](https://github.com/johanzander/bess-manager/issues/501))
+- **"-0.00" no longer displays for values that round to zero** — e.g. a curtailed period's export revenue now shows as "0.00".
+- **Reported cost and savings no longer include a phantom charge for periods that will actually be curtailed at runtime by PV export-limit curtailment.** ([#502](https://github.com/johanzander/bess-manager/issues/502))
+- **Growatt VPP installs with AC charging disabled at the inverter now get it re-enabled on restart** — an inverter reporting VPP Status enabled but AC charging disabled was treated as fully configured, so planned grid-charging periods silently drew nothing from the grid. Each of the two registers is now checked and repaired on its own, so a drifted one is fixed without rewriting the healthy one. ([#539](https://github.com/johanzander/bess-manager/issues/539))
+- **With PV export-limit curtailment enabled, the battery now fills from below-floor surplus solar instead of deferring the charge** — the sell-price floor makes every below-floor export worth exactly 0 to the optimizer, so charge-now and curtail-now tied on float noise and the deferred pick clipped PV to house load while multi-kWh of battery headroom sat unused. ([#510](https://github.com/johanzander/bess-manager/issues/510))
+- The consumption forecast now refreshes intraday like solar already does, instead of caching stale data until the 23:55 job. ([#395](https://github.com/johanzander/bess-manager/issues/395))
+- Inverter schedule display no longer shows a fictional TOU mode label for VPP/period-list-controlled installs. ([#415](https://github.com/johanzander/bess-manager/issues/415))
+- **A silently dropped quarterly schedule-update tick permanently lost a period's actuals with no trace it ever happened** — the missed tick is now logged and surfaced as a runtime failure. ([#403](https://github.com/johanzander/bess-manager/issues/403))
+- The "Enable Live Control" pre-flight dialog showed a green check for optional components that were genuinely failing (e.g. a misconfigured InfluxDB), not just ones left unconfigured. Those now show an amber warning — they still never block enabling live control.
+- Settings → Savings History silently displayed "0 days recorded" when the disk-usage request failed, and swallowed errors when clearing the history. Both now surface the actual error.
+
+### Removed
+
+- **"Min Action Profit" setting** — the DP optimizer stopped reading it when the profitability gate was replaced by pure backward induction (v10.0.0), but the field stayed in Settings → Battery and the setup wizard, still describing behaviour ("the optimizer skips cycles where the expected gain is below this value") that no longer happened. Removed from the UI, the settings schema, and the API. Existing configs are migrated automatically; no action needed.
+
+## [10.0.2] - 2026-08-10
+
+### Fixed
+
+- Minor internal cleanup in the debug export.
+
+## [10.0.1] - 2026-08-02
+
+### Fixed
+
+- `HuaweiController.sync_soc_limits` now reads before writing SOC limits, instead of writing unconditionally on every sync. ([#427](https://github.com/johanzander/bess-manager/issues/427))
+- A failed startup timezone fetch now surfaces on the runtime-failures banner instead of silently falling back to `Europe/Stockholm`. ([#440](https://github.com/johanzander/bess-manager/issues/440))
+- The Runtime Errors panel no longer shows a blank "Error:" line; it now shows the real message and occurrence count. ([#60](https://github.com/johanzander/bess-manager/issues/60))
+- "Report a Problem" → "File GitHub Issue" no longer gets silently dropped by popup blockers. ([#60](https://github.com/johanzander/bess-manager/issues/60))
+- **Default InfluxDB bucket pointed at a nonexistent database, and InfluxDB errors hid their real cause** — Corrected the default bucket name and included the response body in all error messages. ([#434](https://github.com/johanzander/bess-manager/pull/434))
+
+## [10.0.0] - 2026-07-30
+
+### Added
+
+- New inverter platforms: **Solis** (`solis_modbus`) ([#130](https://github.com/johanzander/bess-manager/issues/130)), **Huawei LUNA2000** ([#120](https://github.com/johanzander/bess-manager/issues/120)), and a **Growatt VPP control mode** for `solax_modbus` (GEN3/GEN4) ([#118](https://github.com/johanzander/bess-manager/issues/118)) as an alternative to persistent TOU scheduling. All experimental, not yet fully real-world validated.
+- **ENTSO-e / Belpex price provider** ([#208](https://github.com/johanzander/bess-manager/pull/208)), plus a **multiplicative spot-price adjustment** (`spot_multiplier`/`export_spot_multiplier`) for contracts that scale the raw spot price rather than adding a flat markup ([#221](https://github.com/johanzander/bess-manager/issues/221), [#227](https://github.com/johanzander/bess-manager/pull/227)).
+- **Solar-clipping-aware optimization** *(opt-in)* — models a hybrid inverter's AC power cap so the optimizer stops over-filling the battery and clipping the midday solar peak.
+- **Daily savings history** with week/month/year aggregates, plus a redesigned Savings page (Day/Month/Year drill-down, Tibber-style history browsing) and a new **Net Grid Cost** headline (wear-free import − export) separate from battery wear reporting. ([#260](https://github.com/johanzander/bess-manager/pull/260))
+- **Self-resolved health-check recovery banner** — surfaces when a sensor that briefly errored has since recovered on its own. ([#215](https://github.com/johanzander/bess-manager/issues/215), [#239](https://github.com/johanzander/bess-manager/pull/239))
+- Setpoint writes now support `input_number.*` entities, not just `number.*`. ([#372](https://github.com/johanzander/bess-manager/issues/372))
+
+### Changed
+
+- **DP optimizer now uses pure backward induction** instead of ad hoc profitability floors and an anti-cycling special case — Bellman's principle already makes the hold-vs-discharge call correctly; equal-or-better economics on all pinned fixtures. ([#253](https://github.com/johanzander/bess-manager/pull/253))
+- Battery SOC/Energy Flow chart now splits charging and discharging by source (Solar→Battery vs Grid→Battery, Battery→Home vs Battery→Grid).
+
+### Fixed
+
+- **DP economics**: several optimizer bugs that made the battery hold, export, or discharge sub-optimally — a terminal-value cap using an already-committed near-term price (root cause of the long-reported "tonight exports, tomorrow evening doesn't" issue, [#422](https://github.com/johanzander/bess-manager/issues/422)/[#126](https://github.com/johanzander/bess-manager/issues/126)), a continuation-value flattening below the SOE floor ([#336](https://github.com/johanzander/bess-manager/issues/336)), a flat-export-tariff market never storing surplus solar ([#359](https://github.com/johanzander/bess-manager/issues/359)), a missing SOLAR_EXPORT-below-max alternative causing mistimed exports ([#313](https://github.com/johanzander/bess-manager/issues/313)), and a coarser action-search grid missing the true optimum ([#282](https://github.com/johanzander/bess-manager/issues/282), [#284](https://github.com/johanzander/bess-manager/pull/284)).
+- **Dashboard/reporting accuracy**: a nightly (23:55) job that corrupted the last few periods of "today" and briefly showed a false "missing historical data" banner ([#380](https://github.com/johanzander/bess-manager/issues/380)); a stuck "Initializing" state after a startup race with unavailable sensors; several small-magnitude data-integrity issues in energy-flow attribution ([#342](https://github.com/johanzander/bess-manager/pull/342), [#350](https://github.com/johanzander/bess-manager/issues/350)).
+- **Settings persistence**: several fields could silently revert to defaults on restart due to duplicated camelCase/snake_case translation logic — settings now use one canonical format end-to-end ([#126](https://github.com/johanzander/bess-manager/issues/126), [#197](https://github.com/johanzander/bess-manager/issues/197), [#219](https://github.com/johanzander/bess-manager/issues/219), [#216](https://github.com/johanzander/bess-manager/pull/216), [#224](https://github.com/johanzander/bess-manager/pull/224)); a live edit to Max Charge/Discharge Power in Settings also wasn't picked up by the already-running inverter controller until a restart ([#398](https://github.com/johanzander/bess-manager/issues/398)).
+- **Growatt cloud sent redundant register writes even when nothing had changed** — a likely contributor to `GrowattV1ApiError` write failures seen in HA logs. ([#402](https://github.com/johanzander/bess-manager/pull/402))
+- **Native SolaX hardware never got Min SOC written to it** — the software-side floor was always respected, but the inverter itself had no independent backstop if the plan was ever bypassed. ([#337](https://github.com/johanzander/bess-manager/issues/337))
+- **Growatt TOU begin/end window could silently fail to update** (wrong HA entity domain for those fields), reverting the inverter to Load First outside its intended window. ([#362](https://github.com/johanzander/bess-manager/issues/362), [#181](https://github.com/johanzander/bess-manager/issues/181))
+- **Runtime energy tracking had no correction for zero-resolution counter gaps**, occasionally misattributing energy to the wrong period and skewing cost-basis/savings figures. ([#387](https://github.com/johanzander/bess-manager/issues/387))
+- **`SOLAR_STORAGE` periods forced a full grid import on any real-time load spike**, even with battery headroom available to cover it. ([#318](https://github.com/johanzander/bess-manager/issues/318))
+- **A failed hardware schedule write could be silently logged as successful and never retried**, permanently drifting the dashboard from the real inverter state. ([#365](https://github.com/johanzander/bess-manager/issues/365))
+- **Dashboard Net Cost/Savings only counted today's slice of a 2-day optimization plan**, making a correctly deferred decision (e.g. holding charge for a better price tomorrow) look like a loss. ([#287](https://github.com/johanzander/bess-manager/issues/287))
+- Locale/regional fixes: Solcast auto-discovery breaking under non-English HA locales ([#218](https://github.com/johanzander/bess-manager/issues/218), [#223](https://github.com/johanzander/bess-manager/pull/223)); setup wizard discovering the wrong (off-grid) SOC-limit sensor ([#270](https://github.com/johanzander/bess-manager/issues/270), [#277](https://github.com/johanzander/bess-manager/pull/277)); per-currency default cycle cost instead of a hardcoded SEK value ([#237](https://github.com/johanzander/bess-manager/pull/237)).
+- Various smaller UI fixes: dark-mode date picker; hourly-resolution period labels ([#126](https://github.com/johanzander/bess-manager/issues/126)); stale live sensor values shown instead of current readings ([#271](https://github.com/johanzander/bess-manager/issues/271)).
+
+### Internal
+
+- Vectorized the DP backward-induction hot loop with numpy (~115x faster). ([#236](https://github.com/johanzander/bess-manager/issues/236), [#278](https://github.com/johanzander/bess-manager/pull/278))
+- Debug bundle export improvements: previous-day data included ([#335](https://github.com/johanzander/bess-manager/issues/335)), fuller entity/state snapshots for replay fidelity ([#332](https://github.com/johanzander/bess-manager/pull/332)), timezone parsing fix for `mock-run.sh` replay.
+
+## [9.8.1] - 2026-06-28
+
+### Changed
+
+- **Debug export now leads with a "Key Findings" section** — the debug bundle opens with an auto-generated digest that surfaces cross-run schedule disagreements (a slot scheduled differently across re-optimization runs) and a deduplicated rollup of today's log anomalies (network/connectivity, data gaps, restarts, runtime errors), grouped by category and source. Raw logs and the full schedule JSON are moved to the bottom, and the health check is captioned as a point-in-time snapshot so its "OK" is not mistaken for "nothing went wrong today." The in-app AI chat uses the same digest instead of the raw log dump. This makes root-causing optimizer decisions and runtime failures much faster. (#198)
+
+## [9.8.0] - 2026-06-27
+
+### Added
+
+- **Redesigned inverter schedule table** — The schedule table in the Inverter Status Dashboard is rebuilt as a single unified table with consistent column widths across today and tomorrow. Intent is now split into separate **Solar** (amber) and **Grid/Discharge** (green/orange) power columns so it's immediately clear which source is charging or discharging. A **Target SOC** column replaces the old SOC field and shows the end-of-period state of charge as a percentage. Pre-optimization (past) rows are greyed out to indicate they are no longer accurate. Inverter Configuration columns (Mode, Charge%, Discharge%, Grid Charge) are hidden for SolaX VPP (`solax_modbus_native`), which does not use TOU-based control. (#194)
+
+## [9.7.1] - 2026-06-27
+
+### Added
+
+- **Energy Flow expandable rows in Savings Overview** — Each row in the Savings Overview table now expands to show a detail panel with per-interval solar, battery, and grid flows. Grid Import and Grid Export cells also display compact sub-flow badges (gridToHome, gridToBattery, solarToGrid, batteryToGrid) to the right of the main value. (#188)
+- **Action-derived charge rate for GRID_CHARGING periods** — The inverter now receives a proportional charge rate command instead of always 100%. For small top-up periods (e.g. filling the last 0.17 kWh at 99.4% SOC) the rate is scaled from the DP algorithm's planned action, matching what was actually optimised. All other intents (SOLAR_STORAGE, IDLE, SOLAR_EXPORT) continue to charge at 100% to accept solar at full rate. (#191)
+
+## [9.7.0] - 2026-06-27
+
+### Fixed
+
+- **Battery locked in `grid_first` during solar-surplus idle periods** — When the optimizer planned no battery action (`power=0`) during periods with active solar export, the classifier returned `BATTERY_EXPORT` (formerly `EXPORT_ARBITRAGE`), which maps to `grid_first`. This blocked the battery from supporting house load during long daytime windows even when solar was insufficient. A new `SOLAR_EXPORT` intent is introduced for power≈0 + solar-to-grid periods; it maps to `load_first` so the battery can serve load while solar exports to the grid. (#187)
+- **Grid charging blocked during solar surplus even at cheaper prices** — The optimizer had a surplus gate that prevented any grid-to-battery charging whenever solar production exceeded home consumption. This caused the optimizer to skip cheap daytime hours in favour of more expensive hours when solar was active. The gate is removed: solar fills the battery first and grid tops up remaining capacity when prices make it worthwhile. On high-solar days this can increase arbitrage savings significantly (up to +12.5 SEK on scenario baselines). (#189)
+- **Schedule Overview discharge rate always showed 100%** — `get_detailed_period_groups()` read `discharge_rate` from the static `INTENT_TO_CONTROL` table (hardcoded 100 for `EXPORT_ARBITRAGE`/`LOAD_SUPPORT`). It now computes the rate from the actual per-period battery action in the schedule, so partial-discharge slots correctly reflect the planned power rather than always showing 100%. (#186)
+- **Battery Settings card showed bare "0 %" when EV charger was inhibiting discharge** — When the EV charger suppresses discharge to 0%, the Discharge Power Rate row now dims and shows an amber "Inhibited" badge instead of a bare percentage. (#186)
+
+### Changed
+
+- **`EXPORT_ARBITRAGE` intent renamed to `BATTERY_EXPORT`** — All references updated across backend, frontend, tests, and documentation. The semantic meaning is unchanged: battery actively discharging to the grid during peak-price windows. (#187)
+
+## [9.6.3] - 2026-06-25
+
+### Fixed
+
+- **Dashboard hourly view returned 500** — `_aggregate_quarterly_to_hourly` was never updated when `observedIntent` was added to `APIDashboardHourlyData` in 9.6.2, so every call to `GET /api/dashboard?resolution=hourly` crashed with a missing required argument.
+- **Inverter platform badge always showed "SolaX Modbus"** — `InverterStatusDashboard.tsx` compared `platform` against legacy short strings (`growatt_min`, `growatt_sph`, `solax`) that never matched the actual API values (`growatt_server_min`, `growatt_server_sph`, etc.), so every user fell through to the else branch and saw "SolaX Modbus". String matching is updated to the current API values. (#60)
+- **Growatt SPH TOU intervals rendered "Segment #undefined"** — `GrowattSphController.build_schedule` built `tou_intervals` without `segment_id` or `is_default` fields. The frontend template assumed both were always present, causing `isDefault` to render as falsy and the segment label to show as undefined. Both fields are now included. (#60)
+- **AI Analyst returned 404 errors on deprecated model IDs** — The AI Analyst feature used `claude-sonnet-4-20250514` and `claude-opus-4-20250514`, the Claude 4.0 launch IDs from May 2025. Anthropic deprecated these IDs (retirement date June 15 2026), causing 404 errors for all users. Updated to `claude-sonnet-4-6` and `claude-opus-4-8`. (#180)
+- **EnergyFlowCards and SystemStatusCard stayed frozen between refreshes** — Both components called `useDashboardData()` without a refresh interval, so they fetched only on mount. The main dashboard page polls every 60 s but the cards remained stale. Both now pass a 60 s interval, staying in sync with the dashboard cadence. (#179)
+- **Energy Prediction health check validates active consumption strategy** — The health check was hardcoded to validate `get_estimated_consumption` (the `sensor` strategy sensor) regardless of which strategy was configured, producing false-positive warnings for users running `fixed`, `influxdb_7d_avg`, or `ha_statistics`. The check now only validates `get_estimated_consumption` when `sensor` is the active strategy; solar forecast validation is unchanged. (#160)
+- **Nord Pool HACS continental areas mapped to Norway** — The entity-id regex in `_parse_nordpool_area_from_entity_id` only matched original Nord Pool members (SE/NO/DK/FI/EE/LT/LV). HACS users with continental area codes (NL, BE, DE, DE-LU, FR, AT, PL) got `None` from the parser; the `raw.upper()` fallback produced a long string starting with "NO", so `_hints_from_nordpool_area` read the "NO" prefix and returned Norwegian krone instead of the correct currency. The regex is extended to cover all continental areas. (#171)
+- **Nord Pool Currency field always read-only in UI** — Both Nord Pool provider variants rendered the Currency input with `readOnly: true` unconditionally, preventing users from correcting a wrong auto-detected currency. The field is now editable when area or currency detection has not produced a value. (#171)
+- **Next-day schedule timestamps stamped with today's date** — The `prepare_next_day` path set `optimization_period=0` and then called `period_index_to_timestamp(0..95)`, which anchors index 0 to today. Period timestamps in the next-day schedule were therefore labeled `YYYY-MM-DD (today) HH:MM` instead of `YYYY-MM-DD (tomorrow) HH:MM`. `_add_timestamps_to_period_data` now accepts a `next_day` flag that offsets the period index by today's period count before timestamp conversion, so all periods resolve to tomorrow's date. (#155)
+
+### Refactored
+
+- **Unified `prepare_next_day` and extended-horizon data paths** — `_gather_optimization_data` previously had two independent branches that each fetched tomorrow's solar forecast and the consumption forecast separately. Any bug had to be fixed twice. The two branches now share a single fetch stage (`_fetch_tomorrow_solar_forecast` helper + cache-first consumption fetch) before diverging only for array-building. The 23:55 next-day publish and the rolling hourly run behave identically to before; only the duplication is removed. (#157)
+
+## [9.6.2] - 2026-06-24
+
+### Fixed
+
+- **SolaxModbus (GEN4): Load First defeated by EMS discharge register** — `apply_period()` was writing `discharge_rate=0` to the EMS register for all modes including `load_first`, overriding the inverter's own Load First logic and causing grid imports during periods that should rely on the battery. The EMS discharge register is now only written for `battery_first` and `grid_first` modes. (#166)
+- **SolaxModbus: optional preflight checks blocked "Enable Live Control"** — The `PreflightCheckDialog` treated `NOT_CONFIGURED` optional components (e.g. Solcast) as errors, preventing users from enabling live control when non-required integrations were absent. Optional checks are now correctly non-blocking. (#169)
+- **SolaxModbus: demo→live transition left inverter in bad state** — Switching from demo mode to live control skipped hardware initialization: TOU slots 2–9 from any prior 9-segment configuration were never cleaned up and SOC limits were never written, so the single-segment SolaxModbus controller could not start cleanly. Hardware initialization (disable legacy TOU slots, sync SOC limits) is now always performed on demo→live transition. (#169)
+- **Nordpool continental areas locked to SEK currency** — The discovery hint map only covered original Nord Pool members (SE/NO/DK/FI/EE/LT/LV/GB). For post-expansion areas (NL, BE, DE-LU, FR, AT, PL) no currency hint was returned, the SEK bootstrap default from `config.yaml` stayed in place, and the Settings UI locked the Currency field to SEK. Continental day-ahead areas are now mapped with their correct currency and VAT rate. (#163)
+- **SOLAR_STORAGE shown overnight when battery starts below minimum SOE** — When initial SOE was below `min_soe_kwh`, `_state_transition` clamped the next SOE up to the floor during IDLE periods. `_idle_battery_flows` was interpreting that clamp delta as passive solar charging, causing every overnight IDLE period to display as SOLAR_STORAGE even at 2 am with no solar production. Fixed by returning zero flows when `soe < min_soe_kwh`. (#161)
+
+## [9.6.1] - 2026-06-21
+
+### Fixed
+
+- **LOAD_SUPPORT discharged at full rate instead of the planned pace** — The DP optimizer models partial discharge for LOAD_SUPPORT (e.g. discharge 0.4 kW and let the grid cover the rest, reserving the battery for a later expensive peak), but the inverter control layer always wrote `discharge_rate=100%`, so the battery dumped at full power and drained early. LOAD_SUPPORT now scales the inverter discharge rate from the planned battery action, mirroring EXPORT_ARBITRAGE. (Issue #147)
+- **Consumption strategy change silently dropped in setup wizard** — `POST /api/setup/complete` only entered the home settings block when `currency` or `consumption` were non-null; changing `consumptionStrategy`, `maxFuseCurrent`, `voltage`, or other home-only fields without also touching those two fields caused the change to be silently lost. Same flaw applied to the battery block (guarded by `totalCapacity` only) and electricity-price block. All three blocks now use an `any(f is not None …)` guard covering every field in the section.
+- **Consumption strategy change takes effect immediately** — Updating `consumption_strategy` via `update_settings()` now clears the stale prediction cache so the next optimization cycle fetches predictions under the new strategy, rather than waiting until the nightly `prepare_next_day` refresh at 23:55.
+- **Next-day schedule used today's solar forecast** — The `prepare_next_day` optimization built tomorrow's battery schedule from *today's* Solcast forecast instead of tomorrow's, so the plan written to the inverter could be optimized against substantially wrong solar production (e.g. 28.5 kWh today vs 64.8 kWh forecast for the next day). It now uses `get_solar_forecast_tomorrow()`, mirroring the extended-horizon path, with the same zeros fallback when tomorrow's forecast is unavailable.
+- **Next-day schedule ignored the real battery SOC** — The `prepare_next_day` run (cron at 23:55, when current SOC is known and ≈ tomorrow's starting SOC) discarded the actual SOC and assumed minimum SOC. On any night the battery wasn't actually empty, tomorrow's plan started from a wrong state and under-used stored energy. It now seeds the next-day plan from the real current SOC, matching the regular optimization path.
+
+## [9.6.0] - 2026-06-20
+
+### Fixed
+
+- **Solar-export savings over-crediting** — On sunny days the optimizer booked revenue for exporting surplus solar that the inverter actually stores in the battery (a `load_first` "store" period stores *all* surplus), inflating reported savings by roughly 8–16%. Surplus handling is now modelled as a binary per-period choice — store all surplus (no phantom export) or export all surplus — and export is credited per disposition, so reported savings match what the hardware can actually deliver. Verified end-to-end by a new closed-loop plan-faithfulness simulator that confirms planned and realized economics agree to the öre. This also removes the morning charge/export "dithering" some users observed.
+- **Production-safety hardening** — Guard against a `ZeroDivisionError` when battery `total_capacity` is 0; replace `assert`-based validation of production data with explicit `SystemConfigurationError` (so the checks survive Python's `-O` optimization flag); and harden inverter TOU time-range parsing against malformed values.
+### Changed
+
+- **Battery surplus handling is now a binary store/export decision per period** — Schedules may differ from previous versions: instead of partial solar-to-battery splits, each period either stores all surplus solar or exports all of it. This is forecast-robust by construction — bonus solar beyond the forecast is always captured or exported, never wasted.
+
+### Improved
+
+- **Installation guide — consumption forecast (Step 3)** — Reworked into a comparison of all four consumption strategies with a clear recommendation to use `ha_statistics` (most accurate, no manual sensor setup), including the Home Assistant Energy-dashboard requirement and the ~7-day warm-up behaviour.
+
+## [9.5.0] - 2026-06-15
+
+### Added
+
+- **Demo Mode** — New users can observe how BESS Manager would optimize their battery without actually controlling the inverter. The setup wizard now offers a "Demo Mode" vs "Live Control" choice as the final step. While in demo mode, the optimizer runs normally but all inverter writes are blocked; savings are labeled as theoretical estimates. A persistent banner shows the current mode with a "Go Live" button that triggers a pre-flight health check before enabling live control. Demo mode is also available as a toggle in the new **System** tab on the Settings page.
+- **Settings page consolidation** — The Settings page now has five tabs: Integrations, Electricity Pricing, Battery, Home, and System. The old Health tab has been replaced by System, which combines demo mode toggle, AI analyst settings, and diagnostics (health checks + debug export).
+
+### Fixed
+
+- **Dockerfile and package script now auto-include new backend modules** — Previously each Python file had to be listed by name in both `Dockerfile` and `package-addon.sh`; new files (like `ai_chat.py`) were silently excluded from builds, causing `ModuleNotFoundError` at runtime. Both now use a `*.py` glob.
+- **Removed legacy `config.dev.yaml`** — `bess_manager/config.yaml` is the single source of truth for version and add-on metadata.
+
+### Improved
+
+- **Installation instructions** — Expanded Step 1 in README and Installation Guide with explicit navigation steps for first-time Home Assistant users.
+
+## [9.4.3] - 2026-06-15
+
+### Fixed
+
+- **Single changelog source of truth** — `bess_manager/CHANGELOG.md` is now a symlink to the repository-root `CHANGELOG.md` instead of a hand-maintained copy. The duplicate had drifted (it stopped at 9.4.0), so the Home Assistant add-on Changelog tab was showing outdated release notes; it now always reflects the canonical changelog.
+
+## [9.4.2] - 2026-06-15
+
+### Fixed
+
+- **Removed duplicate "Runtime Errors" alert for unavailable InfluxDB history** — When InfluxDB historical data is missing, the dedicated "Incomplete Historical Data" dashboard banner already informs the user. v9.4.1 additionally recorded the same condition in the runtime-failure tracker, so it also appeared in the "Runtime Errors" panel — alarming, since that panel is meant for unexpected, actionable failures and the condition is benign (optimization continues normally). The redundant runtime-error alert is no longer raised; the friendly banner remains the single source of truth.
+
+## [9.4.1] - 2026-06-14
+
+### Fixed
+
+- **Optimization no longer freezes when InfluxDB history is unavailable** — Historical reconstruction from InfluxDB is an optional enhancement (it backfills the actuals/savings view) and is never required to run the optimization, which uses live battery SOC plus the configured forecast. Previously a broken InfluxDB connection (e.g. after a Home Assistant update) raised a fatal error that aborted every re-optimization, silently freezing the battery on the midnight forecast for the whole day. The missing-history condition is now surfaced as a runtime failure banner and the hourly optimization continues. Note: the `influxdb_7d_avg` consumption strategy still genuinely requires InfluxDB.
+
+## [9.4.0] - 2026-06-12
+
+### Fixed
+
+- **SPH platform capability gating** — UI and backend now disable features unsupported by SPH inverters (grid charge toggle, discharge power rate, fuse protection). Prevents "No entity ID configured for Grid Charge Enabled" errors. (#60)
+- **SPH sensor definitions and device discovery** — Fixed sensor key mappings and discovery logic for SPH inverters. UI no longer incorrectly shows "solax" for SPH configurations. (#60)
+- **Dead lifetime sensors removed** — Removed non-existent lifetime sensor keys from all platform UI definitions.
+
+## [9.3.0] - 2026-06-12
+
+### Changed
+
+- **Add-on now distributed as pre-built Docker images** — HA Supervisor pulls images from GHCR instead of building from source. Faster installs, no build failures on low-powered hardware.
+- **Add-on metadata moved to `bess_manager/` subdirectory** — Fixes compatibility with HA Supervisor 2026.06.x which changed how add-on repositories are scanned.
+
+## [9.2.1] - 2026-06-10
+
+### Fixed
+
+- **SPH per-period apply failed every 15 minutes** — `GrowattSphController` inherited base class `_write_period_to_hardware` which tried to set `grid_charge` and `discharging_power_rate` entities that don't exist for SPH. Added no-op override since SPH deploys the full schedule atomically via service calls. (#60)
+- **Octopus discovery picked gas entities for electricity import** — Discovery used keyword matching on `entity_id` instead of `unique_id` regex matching (like all other platforms). Gas rate entities matched the import pattern. Rewritten to use regex on `unique_id` requiring `octopus_energy_electricity_` prefix, which inherently excludes gas. (#60)
+- **Debug export missing Octopus Energy entities** — Added `octopus_energy` to entity registry export domains so Octopus entities appear in debug logs.
+
+## [9.2.0] - 2026-06-09
+
+### Fixed
+
+- **SPH inverter discovery failed** — ENTITY_SUFFIX_MAP only had MIN (tlx_*) keys, missing SPH (mix_*) keys. Split into per-platform suffix maps; discovery now picks the platform with more matches. (#111)
+- **Wizard /api/setup/confirm endpoint was fragile** — Removed partial-state persistence endpoint; wizard now saves all settings atomically via /api/setup/complete. Octopus discovery rewritten to use entity registry platform field instead of string-matching entity_ids. (#112)
+- **Non-Swedish locale defaults not persisted** — Bootstrap hardcoded SEK/1.25 VAT/Swedish grid costs for all users. Discovery now persists currency, VAT, and pricing defaults immediately for detected locale. (#113)
+
+## [9.1.0] - 2026-06-08
+
+### Added
+
+- **AI Analyst chat panel** — Embedded AI analyst in the web UI. Ask questions about battery performance, optimization decisions, savings, and configuration from a floating chat panel on any page. Responses stream in real-time via SSE. The AI has full source code access (reads files, searches code) and uses live system data (sensors, schedules, prediction snapshots, logs) as context. Requires a Claude API key configured in Settings > AI Analyst. Prompt caching reduces follow-up message costs by ~90%.
+- **Period-level retry with user-facing banners** — When HA supervisor is temporarily unresponsive, per-period hardware writes retry after 3 and 8 minutes instead of waiting 15 minutes for the next cycle. Dashboard shows clear banners like "Period 68 (17:00): Could not apply optimization to inverter, retrying in 3 min".
+- **Startup progress spinner** — Dashboard shows live initialization progress instead of 502 Bad Gateway.
+
+### Fixed
+
+- **AI chat showed wrong savings numbers** — The AI analyst saw battery-only savings instead of the total savings shown on the dashboard. Fixed to match UI definition. Also clarified savings definitions (total vs battery-only) in domain knowledge.
+- **Schedule bar showed "Charging from Grid" during solar charging** — Intent classifier now compares dominant energy source (`grid_to_battery > solar_to_battery`) instead of using a near-zero threshold that triggered on any tiny grid supplement.
+- **Cryptic error messages on inverter write failures** — Hardware write operations now include descriptive operation labels instead of generic "Call number.set_value" messages.
+- **502 Bad Gateway on startup** — Moved initialization to a background thread so the web server binds immediately.
+- **InfluxDB warnings on startup when not configured** — Unconfigured InfluxDB state now detected early and handled gracefully.
+
+## [9.0.0] - 2026-06-04
+
+### Added
+
+- **SolaX inverter support** — native SolaX inverters now supported via the homeassistant-solax-modbus HACS integration, using VPP active-power commands for battery control. Setup wizard auto-detects SolaX entities and shows platform-specific sensor configuration.
+- **Growatt Local Modbus support** — Growatt MIN (GEN4) and SPH/MIX (GEN3) inverters can now be controlled locally via the solax_modbus HACS integration instead of the Growatt cloud API, providing faster response times and no cloud dependency.
+- **Single-segment TOU for Growatt Modbus** — replaces the 9-slot TOU approach with a single TOU segment updated per-period, reducing required HA entities from 45 to 5. Legacy TOU slots 2-9 are auto-migrated on startup.
+- **Failure tracking improvements** — recurring failures are coalesced with occurrence counts, inverter command failures are surfaced in the dashboard banner, and per-sensor failure categories auto-dismiss on recovery.
+- **Scenario-driven wizard tests** — setup wizard and discovery tests load from JSON scenario files covering all supported integration combinations.
+
+### Changed
+
+- **Energy flow derivation unified** — `EnergyFlowCalculator` derives `load_consumption`, `system_production`, and `self_consumption` from 5 core sensors on all platforms, eliminating zero values on platforms without dedicated registers.
+- **Multi-platform architecture** — inverter scheduling refactored into an `InverterController` base class with five platform-specific controllers: `growatt_server_min`, `growatt_server_sph`, `solax_modbus_growatt_min` (GEN4), `solax_modbus_growatt_sph` (GEN3), and `solax_modbus_native`. Runtime platform switching without restart.
+- **Entity-registry-based discovery** — sensor auto-detection now exclusively uses the HA entity registry via WebSocket API (unique_id + platform fields, both immutable), replacing fragile states-based discovery that broke when users renamed entities.
+- **Per-platform sensor storage** — sensor configuration is stored per-platform, so switching platforms in the wizard preserves previously entered sensor values.
+
+### Fixed
+
+- **Intent classification** — `classify_strategic_intent()` now checks `grid_to_battery > 0` directly instead of comparing grid import vs home consumption, fixing misclassification when solar partially covers home load.
+- **Nordpool area detection** — uses device registry identifiers instead of brittle entity unique_id parsing; discovery-detected area is no longer overwritten by stale settings.
+- **Hardware write retry** — failed schedule writes are retried on the next quarterly cycle instead of silently running with stale inverter settings.
+
+## [8.7.0] - 2026-05-22
+
+### Fixed
+
+- **Octopus Energy setup wizard** — entity IDs for import/export rates (today/tomorrow) are now persisted when completing the setup wizard. Previously these were collected in the form but never saved, forcing Octopus users (Flux, Agile, etc.) to re-enter them on the Settings page. ([#60](https://github.com/johanzander/bess-manager/issues/60))
+- **Analysis agent** — restructured the `@claude-bot analyze` pipeline to focus on the user's current problem instead of stale issue reports. The bot now triages the latest debug bundle before reading code, and performs a sanity check against recent comments before posting.
+
+### Added
+
+- Setup wizard E2E test coverage for `POST /api/setup/complete` endpoint (3 new tests).
+- Agent documentation sync from beta: verification guidelines, release workflow, scope discipline, worktree conventions, 7-scenario wizard E2E matrix docs, project-level agent memory files.
+- Ruff auto-lint hook for edited Python files (`.claude/settings.json`).
+
+## [8.6.0] - 2026-05-14
+
+### Added
+
+- **HA Statistics consumption forecast strategy** — new `ha_statistics` option that builds a time-of-day consumption profile from the past 7 days of Home Assistant Recorder long-term statistics. Captures daily patterns (morning/evening peaks, overnight baseline) using a trimmed mean that filters out outlier spikes like EV charging. No extra integrations needed — works with the built-in HA Recorder.
+- **Consumption Forecast Comparison** view on the Insights page — collapsible chart comparing all available forecast strategies (sensor, fixed, InfluxDB, HA Statistics) against actual consumption, with MAE accuracy metrics to show which strategy performs best.
+- HA Recorder WebSocket API methods (`get_statistics_during_period`, `list_statistic_ids`, `find_statistic_id`) for querying long-term energy statistics.
+
+## [8.5.1] - 2026-05-12
+
+### Fixed
+
+- Schedule deviation charts Y-axis now always includes zero, fixing missing zero reference on battery charge/discharge chart and duplicate tick labels on small-range charts like grid export.
+
+## [8.5.0] - 2026-05-09
+
+### Added
+
+- "Report a Problem" button in the header that downloads the debug bundle and opens a pre-filled GitHub issue, with inline shortcuts on runtime failure alerts and the global alert banner. ([#94](https://github.com/johanzander/bess-manager/pull/94))
+- Raw HA WebSocket discovery dump (nordpool and growatt config entries, scrubbed for secrets and identifiers) in the debug export. ([#94](https://github.com/johanzander/bess-manager/pull/94))
+
+### Fixed
+
+- Nordpool area discovery now extracts the area from entity registry unique_ids (e.g. `SE4-current_price`) instead of config entry data, which HA's WebSocket API does not return. Removes broken attribute-guessing fallbacks for HACS nordpool sensors. ([#91](https://github.com/johanzander/bess-manager/issues/91))
+
+## [8.4.3] - 2026-05-07
+
+### Fixed
+
+- Nordpool area discovery now reads `data.areas` (list) matching the official HA integration format; previous `options.area`/`data.area` lookup never matched real config entries. ([#91](https://github.com/johanzander/bess-manager/issues/91))
+
+## [8.4.2] - 2026-05-03
+
+### Fixed
+
+- Nordpool price area now correctly detected for the official HA core integration (`nordpool_official`); bootstrap default `SE4` placeholder no longer blocks discovery from setting the real area. ([#78](https://github.com/johanzander/bess-manager/issues/78), [#85](https://github.com/johanzander/bess-manager/pull/85))
+- Stale TOU segments on the inverter are now detectable after optimization cycles where schedules matched; TOU interval state is carried forward when the schedule manager is replaced, preventing stale segments from becoming invisible to BESS. ([#88](https://github.com/johanzander/bess-manager/pull/88))
+- `SOLAR_STORAGE` intent now correctly derives `batt_mode` from the `INTENT_TO_MODE` mapping (`load_first`) instead of the hardcoded `battery_first`. ([#88](https://github.com/johanzander/bess-manager/pull/88))
+
+## [8.4.1] - 2026-04-29
+
+### Fixed
+
+- Stale TOU segments left on inverter causing uncontrolled grid export after 24h+ uptime. Past TOU intervals were not cleaned up from hardware when the schedule transitioned to no future intervals. (thanks [@ehrw](https://github.com/ehrw))
+
+## [8.4.0] - 2026-04-29
+
+### Added
+
+- Redesigned Forecast Accuracy page with uniform card grid showing solar accuracy, consumption accuracy, savings comparison, and battery/grid deviations
+- Forecast comparison charts (predicted vs actual) for solar, consumption, battery, grid import, and grid export
+- Hourly deviation bar chart showing how each energy flow deviated from plan
+- Full-day savings breakdown (snapshot vs current) in comparison API
+- Grid import/export tracking in prediction analyzer
+- Prediction snapshots now persist to disk and survive add-on restarts
+
+## [8.3.1] - 2026-04-23
+
+### Fixed
+
+- SOLAR_STORAGE intent now uses `load_first` mode instead of `battery_first` on Growatt MIN and SPH inverters. The previous `battery_first` mode routed solar to the battery first, causing unnecessary grid imports to serve the home even when excess solar was available for both.
+
+### Added
+
+- Mock run time override: `./mock-run.sh <scenario> HH:MM` replays a scenario from a specific time of day.
+
+## [8.3.0] - 2026-04-19
+
+### Fixed
+
+- DP optimizer no longer cycles charge/discharge during solar hours. The profitability check now accounts for the opportunity cost of stored energy: when sell > buy, discharge-for-export is blocked (round-trip losses make it unprofitable); when excess solar is available, the sell price is used as the cost basis floor (solar could have been exported instead). ([#73](https://github.com/johanzander/bess-manager/issues/73))
+- IDLE periods now correctly model passive solar charging with charge rate clamping, and are classified as SOLAR_STORAGE when the battery absorbs excess solar.
+
+## [8.2.3] - 2026-04-18
+
+### Fixed
+
+- Setup wizard failed to auto-detect `battery_discharge_soc_limit_on_grid` entity on Growatt models that expose separate on-grid/off-grid SOC limit entities.
+
+## [8.2.2] - 2026-04-18
+
+### Fixed
+
+- MIN inverter returned 500 errors when the TOU schedule exceeded 9 slots on price-volatile days. Hardware writes now use only the active (capped) intervals with content-aware slot assignment to avoid evicting still-needed segments. (thanks [@pookey](https://github.com/pookey))
+
+## [8.2.1] - 2026-04-17
+
+### Fixed
+
+- SOLAR_STORAGE and GRID_CHARGING periods now correctly write charge rate 100% to the inverter register when power monitoring is disabled. Previously, a stale 0% rate left by a preceding LOAD_SUPPORT or EXPORT_ARBITRAGE period caused the inverter to export excess solar instead of storing it.
+- Nordpool service contract tests now pass when run in isolation, not just as part of the full suite. Backend test path setup no longer implicitly depends on core tests running first.
+- InfluxDB health check now shows actionable error messages (e.g. "Wrong username or password" for HTTP 401) instead of raw status codes.
+- Removed hardcoded fallback values and `hasattr` guards in API endpoints that masked configuration errors with fabricated data. The system now fails explicitly when misconfigured.
+- Detailed schedule endpoint no longer sends `batterySocEnd` and `soc` fields that were hardcoded placeholders (50%) and never actually displayed — dashboard data always owns those values.
+
+### Changed
+
+- Removed redundant local imports throughout the codebase. All imports are now at module level.
+- Added `_get_intent_description()` to `SphScheduleManager` for consistent interface with `GrowattScheduleManager`.
+
+## [8.2.0] - 2026-04-17
+
+### Changed
+
+- Nord Pool HACS custom sensor integration now uses a single sensor entity (which exposes both `raw_today` and `raw_tomorrow` attributes) instead of two separate sensor fields. Existing settings are migrated automatically on first boot.
+- Setup wizard pre-fills current Swedish default values for additional costs (0.77 SEK/kWh) and export compensation (0.20 SEK/kWh) for E.ON in SE4.
+- User Guide substantially expanded: full documentation for all three price providers, all three consumption forecast strategies, and the EV charging discharge inhibit feature.
+- Installation guide updated with corrected InfluxDB v2 connectivity test command.
+
+### Fixed
+
+- Nord Pool official integration now passes the configured area code to the `nordpool.get_prices_for_date` service call and looks up the response by that key. Previously the first list in the response was used regardless of area, which could return wrong-area prices on multi-area installations.
+- Octopus Energy prices are no longer incorrectly inflated by the markup/VAT/additional-costs formula. The backend now detects that Octopus rates are already all-in and uses them as-is for buy prices.
+- Switching price provider to Octopus Energy in the Settings UI now auto-resets markup rate, VAT multiplier, and additional costs to neutral values, preventing stale Nord Pool values from being saved.
+- Partial settings PATCH requests now use deep merge: updating a single nested field (e.g. `config_entry_id`) no longer silently erases sibling fields in the same section.
+
+## [8.1.1] - 2026-04-13
+
+### Added
+
+- Dashboard shows a dedicated "initializing" state immediately after wizard completion while the historical backfill and first schedule build run in the background (instead of a blank or error screen).
+- Wizard re-run no longer clears previously configured values — existing sensor entity IDs, Nordpool config entry ID, and Growatt device ID all survive a re-scan.
+
+### Changed
+
+- Settings API consolidated into a single `GET /api/settings` and `PATCH /api/settings` endpoint, replacing the previous per-section endpoints. Existing installs are migrated automatically on first boot. Frontend updated throughout.
+- Disabled power monitoring now reports `OK` in system health instead of `WARNING`.
+
+### Fixed
+
+- Growatt entity ID discovery now handles both the current SOC sensor name ("State of charge (SoC)") and the legacy name ("Statement of Charge SOC"), covering more installation variants.
+- InfluxDB query skipped cleanly when no sensors are configured, avoiding a crash during first-boot before the wizard completes.
+
+## [8.0.7] - 2026-04-12
+
+### Fixed
+
+- Dashboard banner not cleared after saving any settings change. Health check is now re-run after every settings mutation (battery, electricity, home, energy provider, inverter, sensors) so the banner always reflects the current state.
+
+## [8.0.6] - 2026-04-12
+
+### Fixed
+
+- Dashboard banner showed stale "Electricity Price Data: Critical sensor configuration issue" after wizard completion because `_critical_sensor_failures` was only populated at startup and never cleared. Health check now re-runs at the end of wizard completion.
+- Saving Home settings from the Settings page returned 422 because `currency` (stored in the Pricing form) was not included in the request payload.
+
+## [8.0.5] - 2026-04-12
+
+### Fixed
+
+- `settings_store.py` missing from the root `Dockerfile` used by GitHub/HA Supervisor builds (the `backend/Dockerfile` used for local packaging was already fixed in 8.0.1).
+
+## [8.0.4] - 2026-04-12
+
+### Fixed
+
+- Nordpool `config_entry_id` discovered by the setup wizard was saved to disk but not applied to the running price source, causing the health check to report "No config entry ID configured" until restart.
+- Power monitoring remained disabled after the setup wizard enabled it: `HomePowerMonitor` was only created at startup, so enabling it via the wizard had no effect until restart.
+- Setup wizard completion could corrupt numeric settings with `None` values for fields not included in the payload; live updates now only overwrite fields that were explicitly provided.
+- `settings_store.py` added to `package-addon.sh` build context (missing from local installation packaging).
+
+## [8.0.1] - 2026-04-12
+
+### Fixed
+
+- `settings_store.py` was missing from the Docker image `COPY` step, causing startup to fail with `ModuleNotFoundError`.
+
+## [8.0.0] - 2026-04-12
+
+### Changed
+
+- **Settings storage moved out of `config.yaml`** — all operational settings (battery, home, electricity price, energy provider, Growatt, sensors) are now stored in `/data/bess_settings.json`, owned and managed by the add-on. On first boot, existing settings are automatically migrated from `options.json` — no manual action required. `config.yaml` now only holds InfluxDB credentials.
+
+### Added
+
+- Full-featured Settings page: all configuration (battery parameters, home settings, pricing, sensor entity IDs) is now editable directly in the UI — no more manual `config.yaml` editing for day-to-day configuration.
+- First-time setup wizard with automatic detection of Home Assistant integrations (Growatt, Nordpool, Solcast, phase current sensors) — maps sensor entity IDs automatically so most users need zero manual configuration.
+
+### Removed
+
+- EV charging energy meter support removed (the feature was never wired up to the optimizer and had no effect on battery scheduling).
+
+## [7.17.2] - 2026-04-11
+
+### Added
+
+- Compact debug export now serves three distinct use cases from a single endpoint: exact scenario replay, AI behaviour analysis via bess-analyst + MCP server, and prediction drift analysis throughout the day.
+- Log filtering in compact mode: key events (errors, hardware commands, decisions, intent transitions) from the full day plus the last 50 lines, replacing the previous 2000-line tail that only covered ~2 hours.
+- Entity snapshot rendered as a flat table in compact mode (state + unit per entity) with the full JSON in a collapsible for mock HA replay.
+- Historical periods rendered as a compact markdown table (intent, observed intent, SOE, solar, import, savings) with full JSON collapsible for replay.
+- Schedule section now includes economic summary and a period-decisions table in compact mode.
+- Snapshot section now shows a full-day evolution table (all hourly optimization runs with total savings, actual count, predicted count) for drift analysis, instead of only the latest snapshot.
+- `BESS_VERSION` environment variable set at Docker image build time; `_get_version()` reads it first before falling back to `config.yaml` (local dev).
+- HA metadata fields (`last_changed`, `last_updated`, `last_reported`, `context`) stripped from entity snapshots — not used in any of the three debug use cases.
+- `BESS_URL` added to `.env.example` for MCP server direct port access.
+
+### Fixed
+
+- Log formatter no longer suppresses log content when log lines contain the word "error" — now correctly checks for "error reading" to detect actual read failures.
+- Debug log parser correctly identifies schedule JSON blocks in compact format by requiring the `optimization_period` key, ignoring the economic summary and input metadata blocks that precede the full schedule collapsible.
+- `from_debug_log.py` scenario generator handles compact logs without `input_data` gracefully.
+- Empty entity ID configured in sensor map now raises an explicit `ValueError` immediately instead of producing a confusing downstream failure.
+
+## [7.16.1] - 2026-04-05
+
+### Fixed
+
+- Fixed solar-only charging not applying the configured charging power rate. The power monitor was returning early when grid charging was disabled, leaving the inverter at whatever rate was previously set. It now correctly applies 100% charging power for solar scenarios (no fuse risk).
+
+## [7.16.0] - 2026-04-05
+
+### Added
+
+- Discharge inhibit: optional binary sensor (`discharge_inhibit`) that suppresses BESS discharge when active (e.g. EV charger on, Tibber grid award). Discharge resumes automatically within ~1 minute once the sensor clears. Leave the field empty to disable.
+
+## [7.15.0] - 2026-04-03
+
+### Added
+
+- Dashboard alert banner now has two tiers: red (critical) for required sensor failures and amber (warning) for optional sensors that are configured but not responding.
+- TOU segment write failures are now recorded in the runtime failure tracker and shown in the dashboard instead of being silently swallowed.
+- Health checks treat `not_configured` sensors as SKIPPED rather than ERROR, preventing false warnings for optional sensors the user has not set up.
+
+### Fixed
+
+- Fixed timezone bug where `datetime.now()` returned UTC in the HA add-on container, causing off-by-one hour errors in period and date calculations for users in non-UTC timezones during the window around local midnight.
+- Fixed spurious +0.1 kWh battery charge appearing in all predicted evening hours due to floating-point accumulation in `np.arange()` producing near-zero IDLE power that bypassed direction checks in `_compute_reward()`.
+- Fixed Octopus Energy price source rejecting rates on DST spring-forward days (23-hour days now correctly require 46 periods instead of 48). (thanks [@pookey](https://github.com/pookey))
+
+## [7.14.0] - 2026-04-02
+
+### Added
+
+- Debug export captures a full entity snapshot (raw HA state for every sensor BESS reads), enabling verbatim scenario replay in `mock-run.sh` without reconstructing values from processed data.
+- Mock HA server handles `nordpool.get_prices_for_date` service calls and exposes `/api/config` for timezone, enabling correct `nordpool_official` replay.
+- Mock HA replay seeds historical data directly from the scenario file, removing the InfluxDB dependency. Falls through to InfluxDB when the seed file is absent or all entries are invalid.
+
+### Fixed
+
+- Fixed `regex=` → `pattern=` in FastAPI `Query()` (Pydantic v2 compatibility).
+- Container timezone is now propagated from the host in `dev-run.sh` and `mock-run.sh`.
+
+## [7.13.0] - 2026-03-25
+
+### Added
+
+- Experimental SPH inverter support (`inverter_type: "SPH"` in config). MIN remains the default; SPH is opt-in. (thanks [@GraemeDBlue](https://github.com/GraemeDBlue))
+- `power_monitoring_enabled` config option to disable phase current monitoring when current sensors are unavailable.
+
+## [7.12.0] - 2026-03-25
+
+### Added
+
+- Mock HA development environment (`./mock-run.sh`) — runs the full BESS stack against a local FastAPI mock server. Scenarios are generated from debug logs; no real HA or inverter needed.
+- Debug export now includes raw electricity prices, full addon options (entity IDs, inverter config), and active inverter TOU segments for exact scenario replay.
+
+### Fixed
+
+- Fixed `initial_soe` in debug log export being recorded as a percentage instead of kWh when the midnight SOC snapshot was used.
+
+## [7.11.5] - 2026-03-25
+
+### Fixed
+
+- Fixed DP optimizer charging at a more expensive price window when a cheaper overnight window was available. The backward pass was not propagating future export value at max-SOE states, making early and late charging opportunities appear equally attractive.
+
+## [7.11.4] - 2026-03-24
+
+### Changed
+
+- Refactored DP optimizer hot path to eliminate per-action dataclass allocation, reducing memory pressure during optimization.
+
+### Fixed
+
+- Fixed weather test helper generating invalid `hour=24` datetime strings when forecast spans midnight.
+
+## [7.11.3] - 2026-03-24
+
+### Fixed
+
+- InfluxDB health check no longer reports OK when the bucket is misconfigured — it now tests connectivity with a sensor-agnostic query and reports a clear warning with the current bucket name and correct format.
+- Fixed a variable name collision in the health check that caused a spurious "Critical System Issues Detected" error on startup.
+
+### Changed
+
+- `tax_reduction` default set to `0.0` — Swedish skattereduktion was removed as of Jan 1 2026.
+
+### Documentation
+
+- Added complete InfluxDB setup guide (Steps 2a–2f): two-user setup, `configuration.yaml` snippet, bucket naming (`homeassistant/autogen`), and connection verification.
+- Added Nordpool electricity price section explaining VAT-exclusive pricing, the buy price formula, per-country VAT table, and Swedish cost breakdown (överföringsavgift, energiskatt, moms).
+- Added InfluxDB troubleshooting section with InfluxDB UI navigation steps and a `curl` command to verify BESS read access.
+
+## [7.11.2] - 2026-03-21
+
+### Fixed
+
+- Force Docker cache bust on every version bump so HA always builds frontend from latest source.
+
+## [7.11.0] - 2026-03-21
+
+### Changed
+
+- Dashboard status cards redesigned: removed duplicate status badges, added inline colored pills for Grid/Battery direction and Strategic Intent.
+- Battery card now shows Strategic Intent as the main KPI and Battery Mode as a sub-KPI.
+- Status card labels renamed for clarity: "Power Flow"→"Home Power", "Solar Production"→"Solar Generation", "Home Load"→"Home Usage", "Grid Flow"→"Grid", "Energy & Power"→"Battery".
+- Energy Flow chart switched from step bars to smooth monotone lines with midpoint positioning for clearer period visualisation.
+- Battery Mode Schedule and Energy Flow chart horizontal axes now align exactly.
+- Schedule intent labels updated to plain-language names: "Charging from Grid", "Storing Solar", "Powering Home", "Selling to Grid", "Standby".
+
+## [7.10.0] - 2026-03-16
+
+### Changed
+
+- Dashboard chart layout: Schedule moved to top, followed by Energy Flow and Battery SOC charts. (thanks [@pookey](https://github.com/pookey))
+- Consistent external section headings across all dashboard charts (Schedule, Energy Flow, Battery SOC and Energy Flow). (thanks [@pookey](https://github.com/pookey))
+- Removed electricity price line from Battery SOC chart to reduce right-axis clutter. (thanks [@pookey](https://github.com/pookey))
+- Removed "Battery" label and internal title from Battery Mode Timeline for cleaner layout. (thanks [@pookey](https://github.com/pookey))
+- Removed "Actual hours" / "Predicted hours" legend labels from both charts (shading is self-explanatory). (thanks [@pookey](https://github.com/pookey))
+
+## [7.9.5] - 2026-03-14
+
+### Added
+
+- Configurable consumption forecast strategy via `home.consumption_strategy`: `sensor` (default, HA 48h average), `fixed` (flat rate from config), or `influxdb_7d_avg` (7-day rolling average from InfluxDB power sensor data at 15-minute resolution). (thanks [@pookey](https://github.com/pookey))
+
+## [7.9.4] - 2026-03-14
+
+### Changed
+
+- HA API retries now use exponential backoff (2s, 4s, 8s) instead of a fixed 4-second delay. (thanks [@pookey](https://github.com/pookey))
+- TOU segment write failures now include a descriptive operation string and the HTTP response body for actionable diagnostics. (thanks [@pookey](https://github.com/pookey))
+
+### Fixed
+
+- Unavailable or unknown HA sensors now return `None` instead of 0.0, preventing zero values from corrupting optimization. (thanks [@pookey](https://github.com/pookey))
+- Inverter page no longer blanks when a single API endpoint fails on startup. (thanks [@pookey](https://github.com/pookey))
+
+## [7.9.3] - 2026-03-13
+
+### Added
+
+- Expired TOU intervals shown with reduced opacity, strikethrough times, and an "Expired" badge in the inverter schedule view. (thanks [@pookey](https://github.com/pookey))
+- "Pending Write" amber badge on the inverter page for TOU segments queued but not yet written to hardware. (thanks [@pookey](https://github.com/pookey))
+
+### Changed
+
+- TOU schedule now uses a rolling window: only future periods generate segments, freeing hardware slots during mid-day re-optimizations. (thanks [@pookey](https://github.com/pookey))
+- TOU segment IDs are stable across re-optimizations, preventing hardware slot divergence and overlap warnings. (thanks [@pookey](https://github.com/pookey))
+- When >9 TOU segments are generated, all are kept in memory and the next 9 non-expired are written to hardware; pending segments cascade into freed slots on the next cycle. (thanks [@pookey](https://github.com/pookey))
+
+### Fixed
+
+- Schedule creation crash when optimization produces more than 9 TOU segments. (thanks [@pookey](https://github.com/pookey))
+- KeyError when building stable segment IDs from intervals that had not yet been written to hardware. (thanks [@pookey](https://github.com/pookey))
+
+## [7.8.1] - 2026-03-12
+
+### Fixed
+
+- Battery Mode Schedule tooltip showing incorrect times for sub-hour slot boundaries (e.g. 22:30 displayed as 22:00). (thanks [@pookey](https://github.com/pookey))
+- Current-time marker on Battery Mode Schedule positioned at start of hour regardless of minutes elapsed. (thanks [@pookey](https://github.com/pookey))
+
+## [7.8.0] - 2026-03-10
+
+### Added
+
+- Configurable single/three-phase electricity support via `home.phase_count` (1 or 3, default 3); fixes fuse protection for single-phase systems (common in the UK). (thanks [@pookey](https://github.com/pookey))
+
+### Fixed
+
+- `max_fuse_current`, `voltage`, and `safety_margin_factor` from config.yaml were not being applied — power monitor always ran on hardcoded defaults. (thanks [@pookey](https://github.com/pookey))
+
+## [7.7.1] - 2026-03-10
+
+### Fixed
+
+- Add-on no longer discoverable from GitHub due to invalid `list?` schema type in `config.yaml`. Removed `derating_curve` from schema validation (HA Supervisor does not support nested list types).
+
+## [7.7.0] - 2026-03-09
+
+### Added
+
+- Temperature-based charge power derating for outdoor batteries, using HA weather forecast to apply per-period charge limits via a configurable LFP derating curve. Opt-in via `battery.temperature_derating.enabled` in config.yaml. (thanks [@pookey](https://github.com/pookey))
+
+## [7.6.2] - 2026-03-07
+
+### Changed
+
+- Profitability gate threshold now scales with remaining horizon (`max(15%, remaining/total)`) so mid-day optimizer runs are not held to a full-day savings bar.
+
+## [7.6.1] - 2026-03-07
+
+### Fixed
+
+- Chart dark mode detection now tracks the `dark` CSS class on `<html>` via MutationObserver instead of OS `prefers-color-scheme`, correctly following Tailwind's `class` strategy.
+- Axis tick label colors, grid lines, and price line now render correctly in dark mode.
+
+### Changed
+
+- Vite dev proxy target can be overridden via `VITE_API_TARGET` environment variable.
+
+## [7.6.0] - 2026-03-07
+
+### Added
+
+- Battery Mode Schedule timeline on the Dashboard page, showing a color-coded horizontal bar of strategic intents (Grid Charging, Solar Storage, Load Support, Export Arbitrage, Idle) with hover tooltips, current-hour marker, and tomorrow's plan faded when available. (thanks [@pookey](https://github.com/pookey))
+
+## [7.5.0] - 2026-03-07
+
+### Added
+
+- Timezone is now read automatically from Home Assistant's `/api/config` at startup instead of being hardcoded to `Europe/Stockholm`. Falls back to `Europe/Stockholm` with a warning if HA is unreachable. (thanks [@pookey](https://github.com/pookey))
+
+## [7.4.5] - 2026-03-07
+
+### Fixed
+
+- Startup data collection for the last completed period used live sensors instead of InfluxDB, causing inflated values (e.g. ~2x) and leaving the next period nearly empty on the chart. (thanks [@pookey](https://github.com/pookey))
+- Chart price line now shows visual gaps instead of dropping to zero when price data is unavailable.
+- BatteryLevelChart SOC line no longer shows a flat 0% line for predicted hours with no data.
+
+## [7.4.4] - 2026-03-07
+
+### Fixed
+
+- Chart grid lines now use `prefers-color-scheme` media query for dark mode detection, matching Tailwind's `media` strategy. Previously, charts used a DOM class check that detected Home Assistant's dark mode theme even when BESS UI was rendering in light mode, causing dark grid lines on a white background.
+
+## [7.4.3] - 2026-03-07
+
+### Fixed
+
+- Visual improvements and alignment across EnergyFlowChart and BatteryLevelChart: predicted hours grey overlay added to BatteryLevelChart to match EnergyFlowChart, both charts now show a subtle grey background for tomorrow's data with a solid divider line at midnight.
+- BatteryLevelChart tooltip now handles N/A values correctly and suppresses hover on the zero-anchor phantom point.
+- Fixed `-0` display in battery action tooltip (now shows `0`).
+
+## [7.4.2] - 2026-03-07
+
+### Fixed
+
+- EnergyFlowChart and BatteryLevelChart data now aligned to period start, eliminating one-period misalignment caused by a fake zero-point offset. (thanks [@pookey](https://github.com/pookey))
+- Electricity price line now renders as a step function instead of smooth interpolation.
+- Predicted hours shading now uses Recharts ReferenceArea instead of a raw SVG rect that rendered at incorrect coordinates.
+- Tomorrow period numbers normalised correctly when API returns them as 96-191 continuation.
+- X-axis tick labels use modulo 24 for clean hour display across the day boundary.
+
+## [7.4.1] - 2026-03-07
+
+### Fixed
+
+- Terminal value calculation now uses the median of remaining buy prices instead of the average, preventing peak prices from inflating the estimate and causing the optimizer to hold charge instead of discharging during high-price periods. (thanks [@pookey](https://github.com/pookey))
+
+## [7.4.0] - 2026-03-06
+
+### Changed
+
+- Currency is now configurable throughout the optimization pipeline and UI; removed hardcoded SEK/Swedish locale references. (thanks [@pookey](https://github.com/pookey))
+
+## [7.3.0] - 2026-03-04
+
+### Added
+
+- Extended optimization horizon to 2 days when tomorrow's prices are available, enabling true cross-day arbitrage decisions. Only today's schedule is deployed to the inverter. (thanks [@pookey](https://github.com/pookey))
+- Terminal value fallback when tomorrow's prices aren't yet published, preventing the optimizer from treating stored battery energy as worthless at end of day.
+- Tomorrow's solar forecast support via Solcast `solar_forecast_tomorrow` sensor.
+- Dashboard, Inverter, and Savings pages show tomorrow's planned schedule when available.
+- DST-safe period-to-timestamp conversion throughout.
+
+### Fixed
+
+- Economic summary and profitability gate now scoped to today-only periods, preventing inflated savings figures when the horizon extends into tomorrow.
+
+## [7.2.0] - 2026-03-02
+
+### Changed
+
+- DP optimizer assigns terminal value to stored battery energy at end of horizon, preventing premature end-of-day export.
+
+## [7.1.1] - 2026-03-02
+
+### Fixed
+
+- Battery SOC no longer shows impossible values (e.g. 168%) when battery capacity differs from the 30 kWh default. `SensorCollector`, `EnergyFlowCalculator`, and `HistoricalDataStore` were initialised with the default capacity and only received the configured value via manual propagation in `update_settings()`. They now hold a shared `BatterySettings` reference so the configured capacity is always used for SOC-to-SOE conversion.
+
+## [7.1.0] - 2026-03-01
+
+Thanks to [@pookey](https://github.com/pookey) for contributing this fix (PR #20).
+
+### Fixed
+
+- InfluxDB CSV parsing now uses header-aware column detection instead of hardcoded indices, supporting both InfluxDB 1.x and 2.x where columns appear at different positions depending on version and tag configuration. Queries also match on both `_measurement` and `entity_id` tag to handle both data models.
+- Historical data no longer lost after restart. A sensor name prefix mismatch in the batch query parser caused initial-value lookups to create duplicate entries that overwrote correct per-period values during normalization, producing flat SOC and zero energy deltas across the entire day.
+
+## [7.0.0] - 2026-03-01
+
+Thanks to [@pookey](https://github.com/pookey) for contributing Octopus Energy support (PR #19).
+
+### Added
+
+- Octopus Energy Agile tariff support as a new price source alongside Nordpool. Fetches import and export rates from Home Assistant event entities at 30-minute resolution with VAT-inclusive GBP/kWh prices.
+- Separate import and export rate entities for Octopus Energy, allowing direct sell price data instead of calculated fallback.
+- `get_sell_prices_for_date()` on `PriceSource` for sources that provide direct export/sell rates.
+- `PriceManager.clear_cache()` to propagate settings changes at runtime without restart.
+- Documentation for Octopus Energy setup in README, Installation Guide, and User Guide.
+- UPGRADE.md with step-by-step migration instructions for the breaking config change.
+
+### Changed
+
+- **Breaking:** Unified energy provider configuration into a single `energy_provider:` section. The previous `nordpool:` top-level section and `nordpool_kwh_today`/`nordpool_kwh_tomorrow` sensor entries have been replaced. See [UPGRADE.md](UPGRADE.md) for migration instructions.
+- Price logging now uses currency-neutral column headers instead of hardcoded "SEK".
+- `HomeAssistantSource` now takes entity IDs directly via constructor instead of looking them up from the sensor map.
+- Pricing parameters (markup, VAT, additional costs) now propagate immediately when updated via settings without requiring a restart.
+
+### Removed
+
+- `use_official_integration` boolean from config (replaced by `energy_provider.provider` field).
+- `nordpool_kwh_today`/`nordpool_kwh_tomorrow` from `sensors:` section (moved to `energy_provider.nordpool`).
+- Dead code: `LegacyNordpoolSource` class and unused Nordpool price methods from `ha_api_controller.py`.
+
+### Fixed
+
+- Grid charging now always charges at full power (100%) instead of being throttled to the DP algorithm's planned kW. The DP power level is an energy model artifact, not a hardware rate limit — the power monitor already handles fuse protection correctly. Previously, `hourly_settings` stored a proportional rate (e.g. 25% when the DP planned 1.5 kW out of 6 kW max), causing the inverter to charge far slower than it should during cheap price periods.
+- Removed dead `charge_rate` local variable from `_apply_period_schedule` which was computed but never applied to hardware, eliminating the misleading split-brain between two code paths.
+
+## [6.0.7] - 2026-03-01
+
+### Fixed
+
+- Grid charging now always charges at full power (100%) instead of being throttled to the DP algorithm's planned kW. The DP power level is an energy model artifact, not a hardware rate limit — the power monitor already handles fuse protection correctly. Previously, `hourly_settings` stored a proportional rate (e.g. 25% when the DP planned 1.5 kW out of 6 kW max), causing the inverter to charge far slower than it should during cheap price periods.
+- Removed dead `charge_rate` local variable from `_apply_period_schedule` which was computed but never applied to hardware, eliminating the misleading split-brain between two code paths.
+
+## [6.0.6] - 2026-02-26
+
+### Fixed
+
+- Historical data no longer shows as missing all day when InfluxDB is configured with InfluxDB 1.x (accessed via v2 compatibility API). The Flux query previously included a `domain == "sensor"` tag filter that is absent in 1.x setups, causing the batch query to silently return zero rows. The `_measurement` filter already uniquely identifies sensors, making the domain filter redundant.
+- Batch sensor data that loads successfully but returns no periods is no longer cached, allowing the system to retry on the next 15-minute period rather than remaining stuck with an empty cache for the entire day.
+
+## [6.0.5] - 2026-02-18
+
+### Fixed
+
+- System no longer crashes at startup if the inverter is temporarily unreachable when syncing SOC limits. A warning is logged and startup continues normally; the inverter retains its previous limits.
+
+## [6.0.4] - 2026-02-08
+
+### Added
+
+- Compact mode for debug data export - reduces export size by including only latest schedule/snapshot and last 2000 log lines
+- `compact` query parameter on `/api/export-debug-data` endpoint (defaults to `true`)
+
+### Changed
+
+- MCP server `fetch_live_debug` now uses `compact` parameter instead of `save_locally`
+- Increased MCP server fetch timeout from 60s to 90s for large exports
+- Raised `min_action_profit_threshold` default from 5.0 to 8.0 SEK
+
+### Fixed
+
+- Corrected `lifetime_load_consumption` sensor name in config.yaml (was pointing to daily sensor instead of lifetime)
+
+## [6.0.0] - 2026-02-01
+
+### Changed
+
+- TOU scheduling now uses 15-minute resolution instead of hourly aggregation
+- Eliminates "charging gaps" where minority intents were lost due to hourly majority voting
+- Each 15-minute strategic intent period now directly maps to TOU segments
+- Schedule comparison uses minute-level precision for accurate differential updates
+
+### Added
+
+- `_group_periods_by_mode()` groups consecutive 15-min periods by battery mode
+- `_groups_to_tou_intervals()` converts period groups to Growatt TOU intervals
+- `_enforce_segment_limit()` handles 9-segment hardware limit using duration-based priority
+- DST handling for fall-back scenarios (100 periods) with proper time capping
+
+### Fixed
+
+- Single strategic period (e.g., 15-min GRID_CHARGING) now creates TOU segment instead of being outvoted
+- Overlap detection uses minute-level precision instead of hour-level
+
+## [5.7.0] - 2026-01-31
+
+### Added
+
+- MCP server for BESS debug log analysis - enables Claude Code to fetch and analyze debug logs directly
+- Token-based authentication for debug export API endpoint (for external/programmatic access)
+- `.bess-logs/` directory for cached debug logs (gitignored)
+
+### Changed
+
+- SSL certificate verification enabled by default for MCP server connections (security improvement)
+- Optional `BESS_SKIP_SSL_VERIFY=true` environment variable for local self-signed certificates
+
+## [5.6.0] - 2026-01-27
+
+General release consolidating recent fixes.
+
+## [5.5.0] - 2026-01-27
+
+### Fixed
+
+- Cost basis calculation now correctly accounts for pre-existing battery energy
+
+## [5.4.0] - 2026-01-26
+
+### Added
+
+- InfluxDB bucket now configurable by end user in config.yaml
+
+## [5.3.1] - 2026-01-23
+
+### Fixed
+
+- Improved sensor value handling in EnergyFlowCalculator
+
+## [5.3.0] - 2026-01-22
+
+### Changed
+
+- Updated safety margin to 100%
+- Removed "60 öringen" threshold
+- Removed step-wise power adjustments
+
+## [5.2.0] - 2026-01-22
+
+General release consolidating v5.1.x fixes.
+
+## [5.1.7] - 2026-01-18
+
+### Fixed
+
+- Missing period handling when HA sensors unavailable
+- DailyViewBuilder now creates placeholder periods instead of skipping them when sensor data is unavailable (e.g., HA restart)
+- Snapshot comparison API no longer crashes with IndexError
+
+### Added
+
+- `_create_missing_period()` to create placeholders with `data_source="missing"`
+- Recovery of planned intent from persisted storage when available
+- `missing_count` field in DailyView for transparency
+
+## [5.1.6] - 2026-01-18
+
+### Changed
+
+- Refactored strategic intent to use economics-based decisions
+- Strategic intent now derived from economic analysis rather than inferred from energy flows
+- Prevents feedback loop where observed exports were incorrectly classified as EXPORT_ARBITRAGE
+
+## [5.1.5] - 2026-01-17
+
+### Fixed
+
+- Fixed floating-point precision issue in DP algorithm where near-zero power levels (e.g., 2.2e-16) were incorrectly classified as charging/discharging instead of IDLE
+- Fixed edge case in optimization where no valid action at boundary states (e.g., max SOE with unprofitable discharge) would leave period data undefined, now creates proper IDLE state
+- Fixed `grid_to_battery` energy flow calculation to be correctly constrained by actual battery charging amount, preventing impossible energy flows
+
+## [2.5.7] - 2025-11-10
+
+### Fixed
+
+- Fixed critical bug where invalid estimatedConsumption field in battery settings prevented all settings from being applied
+- Fixed settings failures silently continuing with defaults instead of failing explicitly
+- Currency and other user configuration now properly applied on startup
+
+### Changed
+
+- Settings application now fails fast with clear error message when configuration is invalid
+- Removed estimatedConsumption from internal battery settings (now computed on-demand for API responses only)
+
+## [2.5.5] - 2025-11-07
+
+### Fixed
+
+- Fixed initial_cost_basis returning 0.0 when battery at reserved capacity, causing irrational grid charging at high prices
+- Fixed settings not updating from config.yaml due to camelCase/snake_case mismatch in update() methods
+- Fixed dict-ordering bug where max_discharge_power_kw would be overwritten by max_charge_power_kw depending on key order
+- Added explicit AttributeError for invalid setting keys instead of silent failures
+
+### Changed
+
+- Settings classes now convert camelCase API keys to snake_case attributes automatically
+- Removed silent hasattr() checks in favor of explicit error handling
+- Added Git Commit Policy to CLAUDE.md documentation
+
+## [2.5.4] - 2025-11-07
+
+### Fixed
+
+- Fixed test mode to properly block all hardware write operations using "deny by default" pattern
+- Fixed duplicate config.yaml files - now single source of truth in repository root
+- Removed unused ac_power sensor configuration
+
+### Changed
+
+- Test mode now controlled via HA_TEST_MODE environment variable instead of hardcoded
+- Updated docker-compose.yml to mount root config.yaml for development
+- Updated deploy.sh and package-addon.sh to use root config.yaml
+
+## [2.5.3] - 2025-11-06
+
+### Fixed
+
+- Fixed HACS/GitHub repository installation by restructuring to single add-on layout
+- Moved add-on configuration files (config.yaml, Dockerfile, build.json, DOCS.md) to repository root
+- Removed unnecessary bess_manager/ subdirectory (proper for single add-on repositories)
+- Dockerfile now correctly references backend/, core/, and frontend/ from repository root
+- Build context is now repository root, allowing direct access to all source directories
+
+## [2.5.2] - 2024-11-06
+
+### Added
+
+- Home Assistant add-on repository support for direct GitHub installation
+- Multi-architecture build configuration (aarch64, amd64, armhf, armv7, i386)
+- repository.json for Home Assistant repository validation
+
+### Fixed
+
+- Removed duplicate config.yaml and run.sh files (now using symlinks)
+- Removed duplicate CHANGELOG.md from bess_manager directory
+- Fixed deploy.sh to work with symlinked configuration files
+
+### Changed
+
+- Restructured repository to comply with Home Assistant add-on store requirements
+
+## [2.5.0] - 2024-10
+
+- Quarterly resolution support for Nordpool integration
+- Improved price data handling and metadata architecture
+
+## [2.4.0] - 2024-10
+
+- Added warning banner for missing historical data
+- Added optimization start from below minimum SOC with warning
+- Fixed savings and grid import columns in savings view
+
+## [2.3.0] and Earlier
+
+For earlier version history, see the [commit history](https://github.com/johanzander/bess-manager/commits/main/).

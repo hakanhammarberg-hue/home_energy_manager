@@ -1,0 +1,1198 @@
+"""API DataClasses with canonical camelCase field names."""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from datetime import datetime
+
+from pydantic import BaseModel, field_validator
+
+from core.bess import time_utils
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FormattedValue:
+    """Formatted value structure for frontend display."""
+
+    value: float
+    display: str
+    unit: str
+    text: str
+
+
+def _fixed(value: float, prec: int, thousands: bool = False) -> str:
+    """Format `value` to `prec` decimals, never as "-0.00" for a value that
+    rounds to zero (e.g. a curtailed period's tiny FP-noise export revenue,
+    round(-0.0004, 2) == -0.0). round() preserves the sign of a negative
+    value that rounds to zero; adding 0.0 to that result normalizes -0.0 to
+    0.0 per IEEE 754, before the string ever gets built."""
+    rounded = round(value, prec) + 0.0
+    return f"{rounded:,.{prec}f}" if thousands else f"{rounded:.{prec}f}"
+
+
+def create_formatted_value(
+    value: float, unit_type: str, currency: str, precision: int | None = None
+) -> FormattedValue:
+    """Create FormattedValue with currency parameter.
+
+    Args:
+        value: The numeric value to format
+        unit_type: Type of unit ("currency", "energy_kwh_only", "percentage", "price", etc.)
+        currency: Currency code (e.g. EUR, GBP, SEK, NOK, USD)
+        precision: Override default decimal places (None = use defaults: currency=2, energy=2, percentage=1, price=2)
+    """
+    if unit_type == "currency":
+        prec = precision if precision is not None else 2
+        display = _fixed(value, prec, thousands=True)
+        return FormattedValue(
+            value=value,
+            display=display,
+            unit=currency,
+            text=f"{display} {currency}",
+        )
+    elif unit_type == "energy_kwh_only":
+        # Always use kWh units to ensure consistency in savings view
+        # Small values like 0.2 kWh should remain as "0.2 kWh", not "200 Wh"
+        prec = precision if precision is not None else 1
+        display = _fixed(value, prec)
+        return FormattedValue(
+            value=value,
+            display=display,
+            unit="kWh",
+            text=f"{display} kWh",
+        )
+    elif unit_type == "percentage":
+        prec = precision if precision is not None else 0
+        display = _fixed(value, prec)
+        return FormattedValue(
+            value=value,
+            display=display,
+            unit="%",
+            text=f"{display} %",
+        )
+    elif unit_type == "price":
+        prec = precision if precision is not None else 2
+        price_unit = f"{currency}/kWh"
+        display = _fixed(value, prec)
+        return FormattedValue(
+            value=value,
+            display=display,
+            unit=price_unit,
+            text=f"{display} {price_unit}",
+        )
+    else:
+        # Default fallback
+        display = _fixed(value, 2)
+        return FormattedValue(value=value, display=display, unit="", text=display)
+
+
+@dataclass
+class APISavingsBucket:
+    """API representation of a savings_aggregator.SavingsBucket."""
+
+    label: str
+    startDate: str
+    endDate: str
+    dayCount: int
+    importKwh: FormattedValue
+    importEur: FormattedValue
+    exportKwh: FormattedValue
+    exportEur: FormattedValue
+    gridCost: FormattedValue
+    gridOnlyCost: FormattedValue
+    netSavings: FormattedValue
+    solarSavings: FormattedValue
+    batterySavings: FormattedValue
+    batteryCycleCost: FormattedValue
+    savingsVsGridOnly: FormattedValue
+    solarKwh: FormattedValue
+    batteryChargedKwh: FormattedValue
+    batteryDischargedKwh: FormattedValue
+
+    @classmethod
+    def from_internal(cls, bucket, currency: str) -> APISavingsBucket:
+        t = bucket.totals
+        # netSavings splits cleanly into solar's contribution (self-consumption +
+        # export, no battery) and battery's additional contribution (storage/
+        # timing on top of solar) — solarSavings + batterySavings == netSavings.
+        # Both are wear-free, matching netSavings' own wear-free definition.
+        solar_savings = t.grid_only_cost - t.solar_only_cost
+        battery_savings = t.solar_only_cost - t.grid_cost
+        return cls(
+            label=bucket.label,
+            startDate=bucket.start_date,
+            endDate=bucket.end_date,
+            dayCount=bucket.day_count,
+            importKwh=create_formatted_value(t.import_kwh, "energy_kwh_only", currency),
+            importEur=create_formatted_value(t.import_eur, "currency", currency),
+            exportKwh=create_formatted_value(t.export_kwh, "energy_kwh_only", currency),
+            exportEur=create_formatted_value(t.export_eur, "currency", currency),
+            gridCost=create_formatted_value(t.grid_cost, "currency", currency),
+            gridOnlyCost=create_formatted_value(t.grid_only_cost, "currency", currency),
+            netSavings=create_formatted_value(
+                t.grid_only_cost - t.grid_cost, "currency", currency
+            ),
+            solarSavings=create_formatted_value(solar_savings, "currency", currency),
+            batterySavings=create_formatted_value(
+                battery_savings, "currency", currency
+            ),
+            batteryCycleCost=create_formatted_value(
+                t.battery_cycle_cost, "currency", currency
+            ),
+            savingsVsGridOnly=create_formatted_value(
+                t.savings_vs_grid_only, "currency", currency
+            ),
+            solarKwh=create_formatted_value(t.solar_kwh, "energy_kwh_only", currency),
+            batteryChargedKwh=create_formatted_value(
+                t.battery_charged_kwh, "energy_kwh_only", currency
+            ),
+            batteryDischargedKwh=create_formatted_value(
+                t.battery_discharged_kwh, "energy_kwh_only", currency
+            ),
+        )
+
+
+@dataclass
+class APIPredictionSnapshot:
+    """API representation of PredictionSnapshot."""
+
+    snapshotTimestamp: str  # ISO format
+    optimizationPeriod: int
+    predictedDailySavings: FormattedValue
+    totalExpectedSavings: FormattedValue  # Actuals + predicted remainder
+    periodCount: int  # From daily_view
+    actualCount: int  # From daily_view
+    growattScheduleCount: int  # Number of TOU intervals
+
+    @classmethod
+    def from_internal(cls, snapshot, currency: str) -> APIPredictionSnapshot:
+        """Convert from internal PredictionSnapshot to API format.
+
+        Args:
+            snapshot: PredictionSnapshot object
+            currency: Currency code for formatting
+
+        Returns:
+            APIPredictionSnapshot with camelCase fields
+        """
+        # Compute total savings same way as dashboard: grid_only_cost - hourly_cost
+        total_savings = sum(
+            p.economic.grid_only_cost - p.economic.hourly_cost
+            for p in snapshot.daily_view.periods
+            if p.economic is not None
+        )
+        return cls(
+            snapshotTimestamp=snapshot.snapshot_timestamp.isoformat(),
+            optimizationPeriod=snapshot.optimization_period,
+            predictedDailySavings=create_formatted_value(
+                snapshot.predicted_daily_savings, "currency", currency
+            ),
+            totalExpectedSavings=create_formatted_value(
+                total_savings, "currency", currency
+            ),
+            periodCount=len(snapshot.daily_view.periods),
+            actualCount=snapshot.daily_view.actual_count,
+            growattScheduleCount=len(snapshot.growatt_schedule),
+        )
+
+
+@dataclass
+class APIPeriodDeviation:
+    """API representation of period-level deviation."""
+
+    period: int
+    predictedBatteryAction: FormattedValue
+    actualBatteryAction: FormattedValue
+    batteryActionDeviation: FormattedValue
+    predictedConsumption: FormattedValue
+    actualConsumption: FormattedValue
+    consumptionDeviation: FormattedValue
+    predictedSolar: FormattedValue
+    actualSolar: FormattedValue
+    solarDeviation: FormattedValue
+    predictedGridImport: FormattedValue
+    actualGridImport: FormattedValue
+    gridImportDeviation: FormattedValue
+    predictedGridExport: FormattedValue
+    actualGridExport: FormattedValue
+    gridExportDeviation: FormattedValue
+    predictedSavings: FormattedValue
+    actualSavings: FormattedValue
+    savingsDeviation: FormattedValue
+    deviationType: str
+
+    @classmethod
+    def from_internal(cls, period_deviation, currency: str) -> APIPeriodDeviation:
+        """Convert from internal PeriodDeviation to API format.
+
+        Args:
+            period_deviation: PeriodDeviation object
+            currency: Currency code for formatting
+
+        Returns:
+            APIPeriodDeviation with camelCase fields
+        """
+        return cls(
+            period=period_deviation.period,
+            predictedBatteryAction=create_formatted_value(
+                period_deviation.predicted_battery_action, "energy_kwh_only", currency
+            ),
+            actualBatteryAction=create_formatted_value(
+                period_deviation.actual_battery_action, "energy_kwh_only", currency
+            ),
+            batteryActionDeviation=create_formatted_value(
+                period_deviation.battery_action_deviation, "energy_kwh_only", currency
+            ),
+            predictedConsumption=create_formatted_value(
+                period_deviation.predicted_consumption, "energy_kwh_only", currency
+            ),
+            actualConsumption=create_formatted_value(
+                period_deviation.actual_consumption, "energy_kwh_only", currency
+            ),
+            consumptionDeviation=create_formatted_value(
+                period_deviation.consumption_deviation, "energy_kwh_only", currency
+            ),
+            predictedSolar=create_formatted_value(
+                period_deviation.predicted_solar, "energy_kwh_only", currency
+            ),
+            actualSolar=create_formatted_value(
+                period_deviation.actual_solar, "energy_kwh_only", currency
+            ),
+            solarDeviation=create_formatted_value(
+                period_deviation.solar_deviation, "energy_kwh_only", currency
+            ),
+            predictedGridImport=create_formatted_value(
+                period_deviation.predicted_grid_import, "energy_kwh_only", currency
+            ),
+            actualGridImport=create_formatted_value(
+                period_deviation.actual_grid_import, "energy_kwh_only", currency
+            ),
+            gridImportDeviation=create_formatted_value(
+                period_deviation.grid_import_deviation, "energy_kwh_only", currency
+            ),
+            predictedGridExport=create_formatted_value(
+                period_deviation.predicted_grid_export, "energy_kwh_only", currency
+            ),
+            actualGridExport=create_formatted_value(
+                period_deviation.actual_grid_export, "energy_kwh_only", currency
+            ),
+            gridExportDeviation=create_formatted_value(
+                period_deviation.grid_export_deviation, "energy_kwh_only", currency
+            ),
+            predictedSavings=create_formatted_value(
+                period_deviation.predicted_savings, "currency", currency
+            ),
+            actualSavings=create_formatted_value(
+                period_deviation.actual_savings, "currency", currency
+            ),
+            savingsDeviation=create_formatted_value(
+                period_deviation.savings_deviation, "currency", currency
+            ),
+            deviationType=period_deviation.deviation_type,
+        )
+
+
+@dataclass
+class APISnapshotComparison:
+    """API representation of snapshot comparison."""
+
+    snapshotTimestamp: str
+    snapshotPeriod: int
+    comparisonTime: str
+    periodDeviations: list[dict]  # List of APIPeriodDeviation as dicts
+    totalPredictedSavings: FormattedValue
+    totalActualSavings: FormattedValue
+    savingsDeviation: FormattedValue
+    primaryDeviationCause: str
+    # Full-day savings breakdown at snapshot time (actuals + predicted = total)
+    snapshotTotalSavings: FormattedValue
+    snapshotActualSavings: FormattedValue
+    snapshotPredictedSavings: FormattedValue
+    # Full-day savings breakdown now (actuals + predicted = total)
+    currentTotalSavings: FormattedValue
+    currentActualSavings: FormattedValue
+    currentPredictedSavings: FormattedValue
+    predictedGrowattSchedule: list[dict]  # TOU intervals from snapshot
+    currentGrowattSchedule: list[dict]  # Current TOU intervals
+
+    @classmethod
+    def from_internal(cls, snapshot_comparison, currency: str) -> APISnapshotComparison:
+        """Convert from internal SnapshotComparison to API format.
+
+        Args:
+            snapshot_comparison: SnapshotComparison object
+            currency: Currency code for formatting
+
+        Returns:
+            APISnapshotComparison with camelCase fields
+        """
+        return cls(
+            snapshotTimestamp=snapshot_comparison.reference_snapshot.snapshot_timestamp.isoformat(),
+            snapshotPeriod=snapshot_comparison.reference_snapshot.optimization_period,
+            comparisonTime=datetime.now().isoformat(),
+            periodDeviations=[
+                APIPeriodDeviation.from_internal(dev, currency).__dict__
+                for dev in snapshot_comparison.period_deviations
+            ],
+            totalPredictedSavings=create_formatted_value(
+                snapshot_comparison.total_predicted_savings, "currency", currency
+            ),
+            totalActualSavings=create_formatted_value(
+                snapshot_comparison.total_actual_savings, "currency", currency
+            ),
+            savingsDeviation=create_formatted_value(
+                snapshot_comparison.savings_deviation, "currency", currency
+            ),
+            primaryDeviationCause=snapshot_comparison.primary_deviation_cause,
+            snapshotTotalSavings=create_formatted_value(
+                snapshot_comparison.snapshot_total_savings, "currency", currency
+            ),
+            snapshotActualSavings=create_formatted_value(
+                snapshot_comparison.snapshot_actual_savings, "currency", currency
+            ),
+            snapshotPredictedSavings=create_formatted_value(
+                snapshot_comparison.snapshot_predicted_savings, "currency", currency
+            ),
+            currentTotalSavings=create_formatted_value(
+                snapshot_comparison.current_total_savings, "currency", currency
+            ),
+            currentActualSavings=create_formatted_value(
+                snapshot_comparison.current_actual_savings, "currency", currency
+            ),
+            currentPredictedSavings=create_formatted_value(
+                snapshot_comparison.current_predicted_savings, "currency", currency
+            ),
+            predictedGrowattSchedule=snapshot_comparison.predicted_growatt_schedule,
+            currentGrowattSchedule=snapshot_comparison.current_growatt_schedule,
+        )
+
+
+@dataclass
+class APIDashboardHourlyData:
+    """Dashboard hourly data with canonical FormattedValue interface."""
+
+    # Metadata
+    period: int
+    dataSource: str
+    timestamp: str | None
+
+    # All user-facing data via FormattedValue - canonical naming
+    solarProduction: FormattedValue
+    homeConsumption: FormattedValue
+    batterySocStart: FormattedValue
+    batterySocEnd: FormattedValue
+    batterySoeStart: FormattedValue
+    batterySoeEnd: FormattedValue
+    buyPrice: FormattedValue
+    sellPrice: FormattedValue
+    importCost: FormattedValue
+    exportRevenue: FormattedValue
+    hourlyCost: FormattedValue
+    gridCost: FormattedValue
+    batteryCycleCost: FormattedValue
+    hourlySavings: FormattedValue
+    gridOnlyCost: FormattedValue
+    solarOnlyCost: FormattedValue
+    batteryAction: FormattedValue
+    batteryCharged: FormattedValue
+    batteryDischarged: FormattedValue
+    gridImported: FormattedValue
+    gridExported: FormattedValue
+
+    # Detailed energy flows - automatically calculated in backend models
+    solarToHome: FormattedValue
+    solarToBattery: FormattedValue
+    solarToGrid: FormattedValue
+    clippedSolar: FormattedValue
+    gridToHome: FormattedValue
+    gridToBattery: FormattedValue
+    batteryToHome: FormattedValue
+    batteryToGrid: FormattedValue
+
+    # Solar-only scenario fields
+    gridImportNeeded: (
+        FormattedValue  # How much grid import needed in solar-only scenario
+    )
+    solarExcess: FormattedValue  # How much solar excess in solar-only scenario
+    solarSavings: FormattedValue  # Savings from solar vs grid-only
+    # Wear-free savings, matching APISavingsBucket.from_internal's formula
+    # (this file, above): battery's own contribution on top of solar, and
+    # total savings vs a grid-only baseline. Neither includes battery
+    # wear — that's the pre-existing `hourlySavings` field's job.
+    batterySavings: FormattedValue
+    netSavings: FormattedValue
+
+    # Raw values for logic only
+    strategicIntent: str
+    observedIntent: str | None
+    # Planned PV curtailment (#501): true when this period's SOLAR_EXPORT
+    # is curtailment (grid_exported > 0, sell_price below the export
+    # curtailment floor while curtailment is active), not a genuine
+    # profitable export. See core/bess/models.py DecisionData.curtailed.
+    curtailed: bool
+    directSolar: float
+
+    @classmethod
+    def from_internal(
+        cls, hourly, battery_capacity: float, currency: str
+    ) -> APIDashboardHourlyData:
+        """Convert internal HourlyData to API format using pure dataclass approach."""
+
+        def safe_format(value, unit_type):
+            """Helper to safely format values using pure dataclass approach"""
+            return create_formatted_value(value or 0, unit_type, currency)
+
+        # Calculate derived values
+        solar_production = hourly.energy.solar_production
+        home_consumption = hourly.energy.home_consumption
+        direct_solar = min(solar_production, home_consumption)
+
+        # Period index (0-23 for hourly, 0-95 for quarterly)
+        # Frontend correctly handles different resolutions via resolution parameter
+        return cls(
+            # Metadata
+            period=hourly.period,
+            dataSource="actual" if hourly.data_source == "actual" else "predicted",
+            timestamp=hourly.timestamp.isoformat() if hourly.timestamp else None,
+            # Energy flows
+            solarProduction=safe_format(solar_production, "energy_kwh_only"),
+            homeConsumption=safe_format(home_consumption, "energy_kwh_only"),
+            # Battery state - EnergyData uses battery_soe (State of Energy in kWh)
+            batterySocStart=safe_format(
+                (hourly.energy.battery_soe_start / battery_capacity) * 100.0,
+                "percentage",
+            ),
+            batterySocEnd=safe_format(
+                (hourly.energy.battery_soe_end / battery_capacity) * 100.0,
+                "percentage",
+            ),
+            batterySoeStart=safe_format(
+                hourly.energy.battery_soe_start,
+                "energy_kwh_only",
+            ),
+            batterySoeEnd=safe_format(
+                hourly.energy.battery_soe_end,
+                "energy_kwh_only",
+            ),
+            # Economic data
+            buyPrice=safe_format(hourly.economic.buy_price, "price"),
+            sellPrice=safe_format(hourly.economic.sell_price, "price"),
+            importCost=safe_format(hourly.economic.import_cost, "currency"),
+            exportRevenue=safe_format(hourly.economic.export_revenue, "currency"),
+            hourlyCost=safe_format(hourly.economic.hourly_cost, "currency"),
+            gridCost=safe_format(hourly.economic.grid_cost, "currency"),
+            batteryCycleCost=safe_format(
+                hourly.economic.battery_cycle_cost, "currency"
+            ),
+            hourlySavings=safe_format(hourly.economic.hourly_savings, "currency"),
+            gridOnlyCost=safe_format(hourly.economic.grid_only_cost, "currency"),
+            solarOnlyCost=safe_format(hourly.economic.solar_only_cost, "currency"),
+            # Battery control - use actual charge/discharge for historical data
+            batteryAction=safe_format(
+                (
+                    # For historical data, calculate from actual charge/discharge
+                    (hourly.energy.battery_charged - hourly.energy.battery_discharged)
+                    if hourly.data_source == "actual"
+                    # For predicted data, use the optimization decision
+                    else (hourly.decision.battery_action or 0)
+                ),
+                "energy_kwh_only",
+            ),
+            batteryCharged=safe_format(
+                hourly.energy.battery_charged,
+                "energy_kwh_only",
+            ),
+            batteryDischarged=safe_format(
+                hourly.energy.battery_discharged,
+                "energy_kwh_only",
+            ),
+            # Grid interactions
+            gridImported=safe_format(
+                hourly.energy.grid_imported,
+                "energy_kwh_only",
+            ),
+            gridExported=safe_format(
+                hourly.energy.grid_exported,
+                "energy_kwh_only",
+            ),
+            # Detailed energy flows - using existing calculated fields from backend models
+            solarToHome=safe_format(
+                hourly.energy.solar_to_home,
+                "energy_kwh_only",
+            ),
+            solarToBattery=safe_format(
+                hourly.energy.solar_to_battery,
+                "energy_kwh_only",
+            ),
+            solarToGrid=safe_format(
+                hourly.energy.solar_to_grid,
+                "energy_kwh_only",
+            ),
+            clippedSolar=safe_format(
+                hourly.energy.clipped_solar,
+                "energy_kwh_only",
+            ),
+            gridToHome=safe_format(
+                hourly.energy.grid_to_home,
+                "energy_kwh_only",
+            ),
+            gridToBattery=safe_format(
+                hourly.energy.grid_to_battery,
+                "energy_kwh_only",
+            ),
+            batteryToHome=safe_format(
+                hourly.energy.battery_to_home,
+                "energy_kwh_only",
+            ),
+            batteryToGrid=safe_format(
+                hourly.energy.battery_to_grid,
+                "energy_kwh_only",
+            ),
+            # Solar-only scenario calculations
+            gridImportNeeded=safe_format(
+                max(0, home_consumption - solar_production),
+                "energy_kwh_only",
+            ),
+            solarExcess=safe_format(
+                max(0, solar_production - home_consumption),
+                "energy_kwh_only",
+            ),
+            solarSavings=safe_format(
+                hourly.economic.solar_savings,
+                "currency",
+            ),
+            batterySavings=safe_format(
+                hourly.economic.solar_only_cost - hourly.economic.grid_cost,
+                "currency",
+            ),
+            netSavings=safe_format(
+                hourly.economic.grid_only_cost - hourly.economic.grid_cost,
+                "currency",
+            ),
+            # Raw values for logic
+            strategicIntent=hourly.decision.strategic_intent,
+            observedIntent=hourly.decision.observed_intent,
+            curtailed=hourly.decision.curtailed,
+            directSolar=direct_solar,
+        )
+
+
+@dataclass
+class APICostAndSavings:
+    """Cost and savings data for SystemStatusCard component."""
+
+    todaysCost: FormattedValue
+    todaysSavings: FormattedValue
+    gridOnlyCost: FormattedValue
+    percentageSaved: FormattedValue
+
+
+@dataclass
+class APIDashboardSummary:
+    """Dashboard summary with canonical FormattedValue interface."""
+
+    # Cost scenarios
+    gridOnlyCost: FormattedValue
+    solarOnlyCost: FormattedValue
+    optimizedCost: FormattedValue
+    netGridCost: FormattedValue
+    netSavings: FormattedValue
+
+    # Savings calculations
+    totalSavings: FormattedValue
+    solarSavings: FormattedValue
+    batterySavings: FormattedValue
+
+    # Energy totals
+    totalSolarProduction: FormattedValue
+    totalHomeConsumption: FormattedValue
+    totalBatteryCharged: FormattedValue
+    totalBatteryDischarged: FormattedValue
+    totalGridImported: FormattedValue
+    totalGridExported: FormattedValue
+
+    # Detailed energy flows
+    totalSolarToHome: FormattedValue
+    totalSolarToBattery: FormattedValue
+    totalSolarToGrid: FormattedValue
+    totalGridToHome: FormattedValue
+    totalGridToBattery: FormattedValue
+    totalBatteryToHome: FormattedValue
+    totalBatteryToGrid: FormattedValue
+
+    # Percentages
+    totalSavingsPercentage: FormattedValue
+    solarSavingsPercentage: FormattedValue
+    batterySavingsPercentage: FormattedValue
+    gridToHomePercentage: FormattedValue
+    gridToBatteryPercentage: FormattedValue
+    solarToGridPercentage: FormattedValue
+    batteryToGridPercentage: FormattedValue
+    solarToBatteryPercentage: FormattedValue
+    gridToBatteryChargedPercentage: FormattedValue
+    batteryToHomePercentage: FormattedValue
+    batteryToGridDischargedPercentage: FormattedValue
+    selfConsumptionPercentage: FormattedValue
+
+    # Efficiency metrics
+    cycleCount: FormattedValue
+    netBatteryAction: FormattedValue
+    averagePrice: FormattedValue
+    finalBatterySoe: FormattedValue
+
+    # Full-horizon totals (issue #287): populated only when the DP is running
+    # a 2-day plan, so a decision that correctly defers value to tomorrow
+    # doesn't look like a loss when only today's slice is shown.
+    horizonDays: int = 1
+    netGridCostFullHorizon: FormattedValue | None = None
+    netSavingsFullHorizon: FormattedValue | None = None
+
+    @classmethod
+    def from_totals(
+        cls, totals: dict, costs: dict, battery_capacity: float, currency: str
+    ) -> APIDashboardSummary:
+        """Create summary from totals and cost calculations."""
+        # Extract cost values
+        total_grid_only_cost = costs["gridOnly"]
+        total_solar_only_cost = costs["solarOnly"]
+        total_optimized_cost = costs["optimized"]
+
+        # Calculate savings
+        solar_savings = total_grid_only_cost - total_solar_only_cost
+        battery_savings = total_solar_only_cost - total_optimized_cost
+        total_savings = total_grid_only_cost - total_optimized_cost
+
+        def safe_percentage(numerator: float, denominator: float) -> float:
+            """Safely calculate percentage"""
+            return (numerator / denominator * 100) if denominator > 0 else 0
+
+        return cls(
+            # Cost scenarios
+            gridOnlyCost=create_formatted_value(
+                total_grid_only_cost, "currency", currency
+            ),
+            solarOnlyCost=create_formatted_value(
+                total_solar_only_cost, "currency", currency
+            ),
+            optimizedCost=create_formatted_value(
+                total_optimized_cost, "currency", currency
+            ),
+            netGridCost=create_formatted_value(costs["netGrid"], "currency", currency),
+            horizonDays=costs.get("horizonDays", 1),
+            netGridCostFullHorizon=(
+                create_formatted_value(
+                    costs["netGridFullHorizon"], "currency", currency
+                )
+                if "netGridFullHorizon" in costs
+                else None
+            ),
+            netSavingsFullHorizon=(
+                create_formatted_value(
+                    costs["gridOnlyFullHorizon"] - costs["netGridFullHorizon"],
+                    "currency",
+                    currency,
+                )
+                if "netGridFullHorizon" in costs
+                else None
+            ),
+            netSavings=create_formatted_value(
+                total_grid_only_cost - costs["netGrid"], "currency", currency
+            ),
+            # Savings calculations
+            totalSavings=create_formatted_value(total_savings, "currency", currency),
+            solarSavings=create_formatted_value(solar_savings, "currency", currency),
+            batterySavings=create_formatted_value(
+                battery_savings, "currency", currency
+            ),
+            # Energy totals
+            totalSolarProduction=create_formatted_value(
+                totals["totalSolarProduction"], "energy_kwh_only", currency
+            ),
+            totalHomeConsumption=create_formatted_value(
+                totals["totalHomeConsumption"], "energy_kwh_only", currency
+            ),
+            totalBatteryCharged=create_formatted_value(
+                totals["totalBatteryCharged"], "energy_kwh_only", currency
+            ),
+            totalBatteryDischarged=create_formatted_value(
+                totals["totalBatteryDischarged"], "energy_kwh_only", currency
+            ),
+            totalGridImported=create_formatted_value(
+                totals["totalGridImport"], "energy_kwh_only", currency
+            ),
+            totalGridExported=create_formatted_value(
+                totals["totalGridExport"], "energy_kwh_only", currency
+            ),
+            # Detailed energy flows
+            totalSolarToHome=create_formatted_value(
+                totals["totalSolarToHome"], "energy_kwh_only", currency
+            ),
+            totalSolarToBattery=create_formatted_value(
+                totals["totalSolarToBattery"], "energy_kwh_only", currency
+            ),
+            totalSolarToGrid=create_formatted_value(
+                totals["totalSolarToGrid"], "energy_kwh_only", currency
+            ),
+            totalGridToHome=create_formatted_value(
+                totals["totalGridToHome"], "energy_kwh_only", currency
+            ),
+            totalGridToBattery=create_formatted_value(
+                totals["totalGridToBattery"], "energy_kwh_only", currency
+            ),
+            totalBatteryToHome=create_formatted_value(
+                totals["totalBatteryToHome"], "energy_kwh_only", currency
+            ),
+            totalBatteryToGrid=create_formatted_value(
+                totals["totalBatteryToGrid"], "energy_kwh_only", currency
+            ),
+            # Percentages
+            totalSavingsPercentage=create_formatted_value(
+                safe_percentage(total_savings, total_grid_only_cost),
+                "percentage",
+                currency,
+            ),
+            solarSavingsPercentage=create_formatted_value(
+                safe_percentage(solar_savings, total_grid_only_cost),
+                "percentage",
+                currency,
+            ),
+            batterySavingsPercentage=create_formatted_value(
+                safe_percentage(battery_savings, total_solar_only_cost),
+                "percentage",
+                currency,
+            ),
+            gridToHomePercentage=create_formatted_value(
+                safe_percentage(totals["totalGridToHome"], totals["totalGridImport"]),
+                "percentage",
+                currency,
+            ),
+            gridToBatteryPercentage=create_formatted_value(
+                safe_percentage(
+                    totals["totalGridToBattery"], totals["totalGridImport"]
+                ),
+                "percentage",
+                currency,
+            ),
+            solarToGridPercentage=create_formatted_value(
+                safe_percentage(totals["totalSolarToGrid"], totals["totalGridExport"]),
+                "percentage",
+                currency,
+            ),
+            batteryToGridPercentage=create_formatted_value(
+                safe_percentage(
+                    totals["totalBatteryToGrid"], totals["totalGridExport"]
+                ),
+                "percentage",
+                currency,
+            ),
+            solarToBatteryPercentage=create_formatted_value(
+                safe_percentage(
+                    totals["totalSolarToBattery"], totals["totalBatteryCharged"]
+                ),
+                "percentage",
+                currency,
+            ),
+            gridToBatteryChargedPercentage=create_formatted_value(
+                safe_percentage(
+                    totals["totalGridToBattery"], totals["totalBatteryCharged"]
+                ),
+                "percentage",
+                currency,
+            ),
+            batteryToHomePercentage=create_formatted_value(
+                safe_percentage(
+                    totals["totalBatteryToHome"], totals["totalBatteryDischarged"]
+                ),
+                "percentage",
+                currency,
+            ),
+            batteryToGridDischargedPercentage=create_formatted_value(
+                safe_percentage(
+                    totals["totalBatteryToGrid"], totals["totalBatteryDischarged"]
+                ),
+                "percentage",
+                currency,
+            ),
+            selfConsumptionPercentage=create_formatted_value(
+                safe_percentage(
+                    totals["totalSolarProduction"], totals["totalHomeConsumption"]
+                ),
+                "percentage",
+                currency,
+            ),
+            # Efficiency metrics
+            cycleCount=create_formatted_value(
+                (
+                    totals["totalBatteryCharged"] / battery_capacity
+                    if battery_capacity > 0
+                    else 0.0
+                ),
+                "",
+                currency,
+            ),
+            netBatteryAction=create_formatted_value(
+                totals["totalBatteryCharged"] - totals["totalBatteryDischarged"],
+                "energy_kwh_only",
+                currency,
+            ),
+            averagePrice=create_formatted_value(
+                totals.get("avgBuyPrice", 0), "price", currency
+            ),
+            finalBatterySoe=create_formatted_value(
+                totals.get("finalBatterySoe", 0), "energy_kwh_only", currency
+            ),
+        )
+
+
+@dataclass
+class APIDashboardResponse:
+    """Complete dashboard response with canonical dataclass structure."""
+
+    # Core metadata
+    date: str
+    currentPeriod: int
+
+    # Financial summary
+    totalDailySavings: float
+    actualSavingsSoFar: float
+    predictedRemainingSavings: float
+
+    # Data structure info
+    actualHoursCount: int
+    predictedHoursCount: int
+    dataSources: list[str]
+
+    # Battery state
+    batteryCapacity: float
+    batterySoc: FormattedValue
+    batterySoe: FormattedValue
+
+    # Main data structures
+    hourlyData: list[APIDashboardHourlyData]
+    tomorrowData: list[APIDashboardHourlyData] | None
+    summary: APIDashboardSummary
+    costAndSavings: APICostAndSavings
+    realTimePower: APIRealTimePower
+    strategicIntentSummary: dict[str, int]
+
+    @classmethod
+    def from_dashboard_data(
+        cls,
+        daily_view,
+        controller,
+        totals: dict,
+        costs: dict,
+        strategic_summary: dict,
+        battery_soc: float,
+        battery_capacity: float,
+        currency: str,
+        hourly_data_instances: list | None = None,
+        resolution: str = "quarter-hourly",
+        tomorrow_data: list[APIDashboardHourlyData] | None = None,
+    ) -> APIDashboardResponse:
+        """Create complete dashboard response from internal data."""
+
+        # Use pre-created hourly data instances to avoid duplication
+        if hourly_data_instances is not None:
+            hourly_data = hourly_data_instances
+        else:
+            # Fallback: create instances if not provided (for backward compatibility)
+            hourly_data = [
+                APIDashboardHourlyData.from_internal(hour, battery_capacity, currency)
+                for hour in daily_view.hourly_data
+            ]
+
+        # Calculate detailed flow totals from the converted hourly data
+        # (detailed flows are only available after APIDashboardHourlyData conversion)
+        detailed_flow_totals = {
+            "totalSolarToHome": sum(h.solarToHome.value for h in hourly_data),
+            "totalSolarToBattery": sum(h.solarToBattery.value for h in hourly_data),
+            "totalSolarToGrid": sum(h.solarToGrid.value for h in hourly_data),
+            "totalGridToHome": sum(h.gridToHome.value for h in hourly_data),
+            "totalGridToBattery": sum(h.gridToBattery.value for h in hourly_data),
+            "totalBatteryToHome": sum(h.batteryToHome.value for h in hourly_data),
+            "totalBatteryToGrid": sum(h.batteryToGrid.value for h in hourly_data),
+        }
+
+        # Override battery charged/discharged totals to match detailed flows perspective
+        # Detailed flows represent GROSS energy (before efficiency losses)
+        # This ensures percentages are correct: solar_to_battery + grid_to_battery = total_charged
+        totals["totalBatteryCharged"] = (
+            detailed_flow_totals["totalSolarToBattery"]
+            + detailed_flow_totals["totalGridToBattery"]
+        )
+        totals["totalBatteryDischarged"] = (
+            detailed_flow_totals["totalBatteryToHome"]
+            + detailed_flow_totals["totalBatteryToGrid"]
+        )
+
+        # Combine basic totals with detailed flow totals
+        complete_totals = {**totals, **detailed_flow_totals}
+
+        # Create summary
+        summary = APIDashboardSummary.from_totals(
+            complete_totals, costs, battery_capacity, currency
+        )
+
+        # Create real-time power data
+        real_time_power = APIRealTimePower.from_controller(controller)
+
+        # Calculate current index based on resolution
+        now = time_utils.now()
+        if resolution == "hourly":
+            # For hourly resolution, use hour number (0-23)
+            current_index = now.hour
+            logger.debug(
+                "Hourly mode: currentPeriod=%s (hour=%s)",
+                current_index,
+                now.hour,
+            )
+        else:
+            # For quarterly resolution, use period index (0-95)
+            current_index = now.hour * 4 + now.minute // 15
+            logger.debug(
+                "Quarterly mode: currentPeriod=%s (hour=%s, minute=%s)",
+                current_index,
+                now.hour,
+                now.minute,
+            )
+
+        actual_data = [h for h in hourly_data if h.dataSource == "actual"]
+        predicted_data = [h for h in hourly_data if h.dataSource == "predicted"]
+
+        actual_savings = sum(h.hourlySavings.value for h in actual_data)
+        predicted_savings = sum(h.hourlySavings.value for h in predicted_data)
+        total_daily_savings = actual_savings + predicted_savings
+
+        # Battery SOE calculation
+        if battery_soc is None:
+            raise ValueError("battery_soc sensor is unavailable")
+        battery_soe = (battery_soc / 100.0) * battery_capacity
+
+        # Create cost and savings data structure for SystemStatusCard
+        cost_and_savings = APICostAndSavings(
+            todaysCost=summary.optimizedCost,
+            todaysSavings=summary.totalSavings,
+            gridOnlyCost=summary.gridOnlyCost,
+            percentageSaved=summary.totalSavingsPercentage,
+        )
+
+        return cls(
+            # Core metadata
+            date=daily_view.date.isoformat(),
+            currentPeriod=current_index,
+            # Financial summary
+            totalDailySavings=total_daily_savings,
+            actualSavingsSoFar=actual_savings,
+            predictedRemainingSavings=predicted_savings,
+            # Data structure info
+            actualHoursCount=len(actual_data),
+            predictedHoursCount=len(predicted_data),
+            dataSources=list({h.dataSource for h in hourly_data}),
+            # Battery state
+            batteryCapacity=battery_capacity,
+            batterySoc=create_formatted_value(battery_soc, "percentage", currency),
+            batterySoe=create_formatted_value(battery_soe, "energy_kwh_only", currency),
+            # Main data structures
+            hourlyData=hourly_data,
+            tomorrowData=tomorrow_data,
+            summary=summary,
+            costAndSavings=cost_and_savings,
+            realTimePower=real_time_power,
+            strategicIntentSummary=strategic_summary,
+        )
+
+
+@dataclass
+class APIRealTimePower:
+    """Real-time power data with unified FormattedValue interface."""
+
+    # Unified formatted values (no duplicates)
+    solarPower: FormattedValue
+    homeLoadPower: FormattedValue
+    gridImportPower: FormattedValue
+    gridExportPower: FormattedValue
+    batteryChargePower: FormattedValue
+    batteryDischargePower: FormattedValue
+    netBatteryPower: FormattedValue
+
+    @classmethod
+    def from_controller(cls, controller) -> APIRealTimePower:
+        """Convert from controller readings to canonical camelCase."""
+
+        # Get raw power values
+        solar_power = controller.get_pv_power()
+        home_load_power = controller.get_local_load_power()
+        grid_import_power = controller.get_import_power()
+        grid_export_power = controller.get_export_power()
+        battery_charge_power = controller.get_battery_charge_power()
+        battery_discharge_power = controller.get_battery_discharge_power()
+        net_battery_power = controller.get_net_battery_power()
+
+        def create_formatted_power(value):
+            """Create formatted power value structure with thousands separators"""
+            if value is None:
+                value = 0
+            if abs(value) >= 1000:
+                return FormattedValue(
+                    value=value,
+                    display=f"{value/1000:.1f}",
+                    unit="kW",
+                    text=f"{value/1000:.1f} kW",
+                )
+            else:
+                return FormattedValue(
+                    value=value,
+                    display=f"{value:,.0f}",
+                    unit="W",
+                    text=f"{value:,.0f} W",
+                )
+
+        return cls(
+            # Unified formatted values (no duplicates)
+            solarPower=create_formatted_power(solar_power),
+            homeLoadPower=create_formatted_power(home_load_power),
+            gridImportPower=create_formatted_power(grid_import_power),
+            gridExportPower=create_formatted_power(grid_export_power),
+            batteryChargePower=create_formatted_power(battery_charge_power),
+            batteryDischargePower=create_formatted_power(battery_discharge_power),
+            netBatteryPower=create_formatted_power(net_battery_power),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Settings API models (Pydantic — used by setup wizard and sensor validation)
+# ---------------------------------------------------------------------------
+
+# Matches valid HA entity IDs: domain.object_id (case-insensitive to handle
+# user-defined entity IDs with uppercase letters in the object_id part).
+_ENTITY_ID_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*\.[a-zA-Z0-9_-]+$")
+
+# Home Assistant integration domain (the "sensor" in "sensor.foo").
+_HA_DOMAIN_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+@dataclass
+class APIStrategyForecast:
+    """API representation of a single consumption forecast strategy."""
+
+    name: str
+    isActive: bool
+    available: bool
+    error: str | None
+    totalKwh: FormattedValue | None
+    hourlyProfile: list[FormattedValue]
+    mae: FormattedValue | None
+
+
+@dataclass
+class APIConsumptionForecastComparison:
+    """API representation of consumption forecast comparison across strategies."""
+
+    activeStrategy: str
+    strategies: list[APIStrategyForecast]
+    actualHourlyProfile: list[FormattedValue | None]
+    actualHoursAvailable: int
+
+
+class APISensorsPayload(BaseModel):
+    """Request/response body for sensor entity ID mappings."""
+
+    sensors: dict[str, str] = {}
+
+    @field_validator("sensors")
+    @classmethod
+    def validate_entity_ids(cls, sensors: dict[str, str]) -> dict[str, str]:
+        for value in sensors.values():
+            if value and not _ENTITY_ID_RE.match(value):
+                raise ValueError(f"Invalid entity ID format: {value}")
+        return sensors
+
+
+class APISetupCompletePayload(BaseModel):
+    """Request body for POST /api/setup/complete — full wizard output."""
+
+    sensors: dict[str, str | dict[str, str]] = {}
+    nordpoolArea: str | None = None
+    nordpoolConfigEntryId: str | None = None
+    growattDeviceId: str | None = None
+    huaweiDeviceId: str | None = None
+    # Battery settings
+    totalCapacity: float | None = None
+    minSoc: float | None = None
+    maxSoc: float | None = None
+    maxChargeDischargePower: float | None = None
+    cycleCost: float | None = None
+    # Home settings
+    currency: str | None = None
+    consumption: float | None = None
+    consumptionStrategy: str | None = None
+    maxFuseCurrent: int | None = None
+    voltage: int | None = None
+    safetyMarginFactor: float | None = None
+    phaseCount: int | None = None
+    powerMonitoringEnabled: bool | None = None
+    managedLoadSensors: list[str] | None = None
+    # Electricity price settings
+    area: str | None = None
+    markupRate: float | None = None
+    vatMultiplier: float | None = None
+    additionalCosts: float | None = None
+    taxReduction: float | None = None
+    spotMultiplier: float | None = None
+    exportSpotMultiplier: float | None = None
+    # Energy provider
+    provider: str | None = None
+    # Nordpool HACS entity (required when provider == "nordpool_hacs")
+    nordpoolEntity: str | None = None
+    # Octopus Energy entity IDs (required when provider == "octopus")
+    octopusImportTodayEntity: str | None = None
+    octopusImportTomorrowEntity: str | None = None
+    octopusExportTodayEntity: str | None = None
+    octopusExportTomorrowEntity: str | None = None
+    # ENTSO-e Transparency Platform entity (required when provider == "entsoe")
+    entsoeEntity: str | None = None
+    # Inverter
+    inverterPlatform: str | None = None
+    # Growatt-via-solax_modbus control strategy ("tou" or "vpp"); ignored by
+    # other platforms and forced to "vpp" server-side for GEN3.
+    inverterControlMode: str | None = None
+    # HA integration domain for vendor service calls (set_tou_periods,
+    # update_time_segment, ...). Empty means the platform's standard domain
+    # (huawei_solar / growatt_server); set it only for an integration that
+    # exposes the same services under a different domain name.
+    inverterServiceDomain: str | None = None
+    # Control mode
+    demoMode: bool | None = None
+
+    @field_validator("inverterServiceDomain")
+    @classmethod
+    def validate_service_domain(cls, domain: str | None) -> str | None:
+        """Reject anything that isn't an HA integration domain.
+
+        This value is interpolated into the /api/services/<domain>/<service>
+        path, so a malformed one produces a confusing 404 from HA rather
+        than a clear configuration error here.
+        """
+        if domain and not _HA_DOMAIN_RE.match(domain):
+            raise ValueError(f"Invalid Home Assistant integration domain: {domain!r}")
+        return domain
+
+    @field_validator("sensors")
+    @classmethod
+    def validate_sensor_entity_ids(
+        cls, sensors: dict[str, str | dict[str, str]]
+    ) -> dict[str, str | dict[str, str]]:
+        for key, value in sensors.items():
+            if isinstance(value, dict):
+                for v in value.values():
+                    if v and isinstance(v, str) and not _ENTITY_ID_RE.match(v):
+                        raise ValueError(f"Invalid entity ID format: {v}")
+            elif isinstance(value, str) and value and key != "platform":
+                if not _ENTITY_ID_RE.match(value):
+                    raise ValueError(f"Invalid entity ID format: {value}")
+        return sensors

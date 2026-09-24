@@ -1,0 +1,569 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import api from '../lib/api';
+import { useDashboardData } from '../hooks/useDashboardData';
+import { FormattedValue, ControlModel } from '../types';
+import { DashboardResponse } from '../api/scheduleApi';
+import { getIntent, isCurtailed } from '../utils/intent';
+import { formatFixed } from '../utils/format';
+import { 
+  DollarSign, 
+  Battery, 
+  TrendingUp,
+  TrendingDown,
+  AlertTriangle,
+  Zap,
+  Home
+} from 'lucide-react';
+
+
+
+// StatusCard component
+export interface StatusCardProps {
+  title: string;
+  keyMetric: string;
+  keyValue: number | string;
+  keyUnit: string;
+  keyAnnotation?: string[];
+  metrics: Array<{
+    label: string;
+    value: number | string;
+    unit: string;
+    icon?: React.ComponentType<{ className?: string }>;
+    color?: 'green' | 'red' | 'yellow' | 'blue';
+    pill?: boolean;
+    breakdown?: string[];
+  }>;
+  color: 'blue' | 'green' | 'yellow' | 'red' | 'purple';
+  icon: React.ComponentType<{ className?: string }>;
+  className?: string;
+  systemMode?: string;
+  headerRight?: React.ReactNode;
+}
+
+export const StatusCard: React.FC<StatusCardProps> = ({
+  title,
+  icon: Icon,
+  color,
+  keyMetric,
+  keyValue,
+  keyUnit,
+  keyAnnotation,
+  metrics,
+  className = "",
+  systemMode,
+  headerRight
+}) => {
+  const colorClasses = {
+    blue: 'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800',
+    green: 'bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-800',
+    red: 'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800',
+    yellow: 'bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800',
+    purple: 'bg-purple-50 border-purple-200 dark:bg-purple-900/20 dark:border-purple-800'
+  };
+
+  const iconColorClasses = {
+    blue: 'text-blue-600 dark:text-blue-400',
+    green: 'text-green-600 dark:text-green-400',
+    red: 'text-red-600 dark:text-red-400',
+    yellow: 'text-yellow-600 dark:text-yellow-400',
+    purple: 'text-purple-600 dark:text-purple-400'
+  };
+
+  const metricColorClasses: Record<string, string> = {
+    green: 'text-green-600 dark:text-green-400',
+    red: 'text-red-600 dark:text-red-400',
+    yellow: 'text-yellow-600 dark:text-yellow-400',
+    blue: 'text-blue-600 dark:text-blue-400'
+  };
+
+  const pillColorClasses: Record<string, string> = {
+    green: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
+    red: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
+    yellow: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',
+    blue: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300'
+  };
+
+  return (
+    <div className={`border rounded-lg p-6 ${colorClasses[color]} ${className}`}>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center">
+          <Icon className={`h-6 w-6 ${iconColorClasses[color]} mr-3`} />
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h3>
+        </div>
+        {headerRight}
+      </div>
+
+      {/*
+        Three-column grid shared by the key metric and every row below it:
+        col 1 = label (left), col 2 = Today/Tomorrow breakdown (only present
+        on some rows), col 3 = value (right). One grid, so column boundaries
+        line up exactly across rows. When no row has a breakdown, col 2 is
+        empty everywhere and col 3 sits flush right against the card edge -
+        i.e. it looks exactly as it did before this feature existed.
+      */}
+      {/*
+        The key metric's label and number are separate grid rows (not one
+        stacked cell), so the breakdown - sharing only the number's row via
+        auto-placement - centers (items-center) against the number itself,
+        not the label+number block.
+      */}
+      <div className="grid grid-cols-[max-content_1fr_max-content] gap-x-3 gap-y-3 items-center mb-2">
+        <p className="col-start-1 text-sm text-gray-600 dark:text-gray-400">{keyMetric}</p>
+        <p className="col-start-1 text-3xl font-bold text-gray-900 dark:text-gray-100">
+          {keyValue}
+          {keyUnit && <span className="text-lg font-normal text-gray-600 dark:text-gray-400 ml-2">{keyUnit}</span>}
+        </p>
+        {keyAnnotation && keyAnnotation.length > 0 && (
+          <div className="col-start-2 justify-self-center flex flex-col items-end">
+            {keyAnnotation.map((line) => (
+              <span key={line} className="text-xs text-gray-500 dark:text-gray-400">{line}</span>
+            ))}
+          </div>
+        )}
+
+        {metrics.map((metric, index) => (
+          <React.Fragment key={index}>
+            <div className="col-start-1 flex items-center">
+              {metric.icon && <metric.icon className="h-4 w-4 mr-2 text-gray-500 dark:text-gray-400" />}
+              <span className="text-sm text-gray-700 dark:text-gray-300">{metric.label}</span>
+            </div>
+            {metric.breakdown && metric.breakdown.length > 0 && (
+              <div className="col-start-2 justify-self-center flex flex-col items-end">
+                {metric.breakdown.map((line) => (
+                  <span key={line} className="text-xs text-gray-500 dark:text-gray-400">{line}</span>
+                ))}
+              </div>
+            )}
+            <div className="col-start-3">
+              {metric.pill && metric.color ? (
+                <span className={`text-sm font-semibold px-2 py-0.5 rounded-md ${pillColorClasses[metric.color]}`}>
+                  {metric.value}{metric.unit && <span className="opacity-70 ml-1">{metric.unit}</span>}
+                </span>
+              ) : (
+                <span className={`text-sm font-semibold ${
+                  metric.color ? metricColorClasses[metric.color] : 'text-gray-900 dark:text-gray-100'
+                }`}>
+                  {metric.value}
+                  {metric.unit && <span className="opacity-70 ml-1">{metric.unit}</span>}
+                </span>
+              )}
+            </div>
+            {systemMode === 'demo' && metric.label === "Today's Savings" && (
+              <div className="col-start-1">
+                <span className="text-xs text-gray-500">theoretical</span>
+              </div>
+            )}
+          </React.Fragment>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+interface SystemStatusCardProps {
+  className?: string;
+  systemMode?: string;
+}
+
+// Issue #287: tomorrow's own slice isn't a backend field - it's the full-horizon
+// total minus today's slice. Formats to the same "<number> <unit>" shape as
+// the backend's FormattedValue.text.
+const formatDelta = (full?: FormattedValue | null, today?: FormattedValue): string | undefined => {
+  if (!full || !today) return undefined;
+  const delta = full.value - today.value;
+  return `${formatFixed(delta, 2)} ${today.unit}`;
+};
+
+const DASHBOARD_REFRESH_MS = 60000;
+
+const SystemStatusCard: React.FC<SystemStatusCardProps> = ({ className = "", systemMode }) => {
+  const { data: dashboardData, loading: dashboardLoading, error: dashboardError } = useDashboardData(undefined, 'quarter-hourly', DASHBOARD_REFRESH_MS);
+  const [inverterData, setInverterData] = useState<any>(null);
+  const [inverterLoading, setInverterLoading] = useState(true);
+  const [inverterError, setInverterError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchInverterData = async () => {
+      try {
+        setInverterLoading(true);
+        const inverterResponse = await api.get('/api/growatt/inverter_status');
+        setInverterData(inverterResponse.data);
+        setInverterError(null);
+      } catch (err) {
+        console.error('Failed to fetch inverter data:', err);
+        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+        setInverterError(`Failed to load inverter data: ${errorMessage}`);
+      } finally {
+        setInverterLoading(false);
+      }
+    };
+
+    fetchInverterData();
+    const interval = setInterval(fetchInverterData, DASHBOARD_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  const statusData = useMemo(() => {
+    if (!dashboardData || !inverterData) return {};
+
+    // Validate dashboard data structure
+    if (typeof dashboardData !== 'object') {
+      console.error(`Invalid dashboard data structure: Unknown error`);
+      return {};
+    }
+
+    // Check for required battery data
+    if (dashboardData.batterySoc === undefined) {
+      console.warn('BACKEND ISSUE: Missing batterySoc in dashboardData');
+    }
+    if (dashboardData.batterySoe === undefined) {
+      console.warn('BACKEND ISSUE: Missing batterySoe in dashboardData');
+    }
+    if (dashboardData.batteryCapacity === undefined) {
+      console.warn('BACKEND ISSUE: Missing batteryCapacity in dashboardData');
+    }
+
+    // Check for missing keys in summary data (comment out missing field check)
+    // batteryCycleCost is not in the summary interface
+    if (dashboardData.summary?.gridOnlyCost === undefined) {
+      console.warn('Missing key: summary.gridOnlyCost in dashboardData');
+    }
+    if (dashboardData.summary?.optimizedCost === undefined) {
+      console.warn('Missing key: summary.optimizedCost in dashboardData');
+    }
+    if (dashboardData.totalDailySavings === undefined) {
+      console.warn('Missing key: totalDailySavings in dashboardData');
+    }
+
+    // Get current battery power and status from quarterly or hourly data
+    const now = new Date();
+    const currentHour = now.getHours();
+    const currentMinute = now.getMinutes();
+
+    // Calculate current period index (0-95) for quarterly resolution
+    const currentPeriodIndex = currentHour * 4 + Math.floor(currentMinute / 15);
+
+    // Find current period data - supports both hourly (24 periods) and quarterly (96 periods)
+    const currentHourData = dashboardData.hourlyData?.length === 24
+      ? dashboardData.hourlyData.find((h) => h.period === currentHour)  // Hourly mode
+      : dashboardData.hourlyData?.[currentPeriodIndex];  // Quarterly mode (direct array access)
+
+    // Validate hourlyData exists
+    if (!dashboardData.hourlyData || !Array.isArray(dashboardData.hourlyData)) {
+      console.warn('BACKEND ISSUE: Missing or invalid hourlyData array in dashboardData');
+    }
+
+    // Get actual battery mode from inverter status (not schedule) -- only
+    // meaningful for tou_register installs; vpp_power/period_list have no
+    // mode register, see docs/superpowers/specs/2026-07-29-control-model-display-design.md.
+    const controlModel: ControlModel = inverterData.controlModel ?? 'tou_register';
+    if (controlModel === 'tou_register' && !inverterData.batteryMode) {
+      throw new Error('MISSING DATA: inverterData.batteryMode is required but missing');
+    }
+    const actualBatteryMode = controlModel === 'tou_register' ? inverterData.batteryMode : undefined;
+
+    // Check for missing keys in hourly data
+    if (currentHourData && currentHourData.batteryAction === undefined) {
+      console.warn('Missing key: batteryAction in currentHourData');
+    }
+
+    if (!currentHourData) {
+      throw new Error('MISSING DATA: currentHourData is required but not found in hourlyData');
+    }
+    if (currentHourData.batteryAction === undefined) {
+      throw new Error('MISSING DATA: batteryAction is required but missing from currentHourData');
+    }
+    const batteryPower = Math.abs(currentHourData.batteryAction);
+    const batteryStatus = currentHourData.batteryAction > 0.1 ? 'charging' :
+                        currentHourData.batteryAction < -0.1 ? 'discharging' : 'idle';
+
+    const intentDisplayNames: Record<string, string> = {
+      GRID_CHARGING: 'Charging from Grid',
+      SOLAR_STORAGE: 'Storing Solar',
+      LOAD_SUPPORT: 'Powering Home',
+      BATTERY_EXPORT: 'Selling to Grid',
+      SOLAR_EXPORT: 'Solar Exporting',
+      IDLE: 'Standby',
+    };
+    const rawIntent = getIntent(currentHourData).toUpperCase().replace(/ /g, '_');
+    // Curtailment doesn't replace the intent (a curtailed period can still
+    // be charging, e.g. SOLAR_STORAGE) -- keep the intent and mark it.
+    const intentName = intentDisplayNames[rawIntent] ?? rawIntent;
+    const strategicIntent = isCurtailed(currentHourData)
+      ? `${intentName} — Curtailed (No Export)`
+      : intentName;
+
+    return {
+      strategicIntent,
+      costAndSavings: {
+        todaysCost: (() => {
+          if (!dashboardData.summary?.netGridCost) {
+            throw new Error('MISSING DATA: summary.netGridCost is required for cost display');
+          }
+          return dashboardData.summary.netGridCost;
+        })(),
+        todaysSavings: (() => {
+          if (!dashboardData.summary?.netSavings) {
+            throw new Error('MISSING DATA: summary.netSavings is required for savings display');
+          }
+          return dashboardData.summary.netSavings;
+        })(),
+        gridOnlyCost: (() => {
+          if (!dashboardData.summary?.gridOnlyCost) {
+            throw new Error('MISSING DATA: summary.gridOnlyCost is required for cost comparison');
+          }
+          return dashboardData.summary.gridOnlyCost;
+        })(),
+        percentageSaved: (() => {
+          if (!dashboardData.summary?.totalSavingsPercentage) {
+            throw new Error('MISSING DATA: summary.totalSavingsPercentage is required for percentage display');
+          }
+          return dashboardData.summary.totalSavingsPercentage;
+        })(),
+        // Issue #287: full-horizon totals, present only when the DP is
+        // running a 2-day plan. Legitimately absent otherwise - no throw.
+        // Tomorrow's own slice isn't a backend field - it's the remainder
+        // of the full-horizon total after subtracting today's slice.
+        horizonDays: dashboardData.summary?.horizonDays ?? 1,
+        netGridCostFullHorizon: dashboardData.summary?.netGridCostFullHorizon ?? null,
+        netSavingsFullHorizon: dashboardData.summary?.netSavingsFullHorizon ?? null,
+        tomorrowCostText: formatDelta(
+          dashboardData.summary?.netGridCostFullHorizon,
+          dashboardData.summary?.netGridCost
+        ),
+        tomorrowSavingsText: formatDelta(
+          dashboardData.summary?.netSavingsFullHorizon,
+          dashboardData.summary?.netSavings
+        ),
+      },
+      batteryStatus: {
+        soc: (() => {
+          if (!dashboardData.batterySoc) {
+            throw new Error('MISSING DATA: batterySoc is required for battery status display');
+          }
+          return dashboardData.batterySoc as any;
+        })(),
+        soe: (() => {
+          if (!dashboardData.batterySoe) {
+            throw new Error('MISSING DATA: batterySoe is required for battery energy display');
+          }
+          return dashboardData.batterySoe as any;
+        })(),
+        power: batteryPower,
+        status: batteryStatus,
+        // Use the actual inverter battery mode instead of optimization schedule
+        batteryMode: actualBatteryMode
+      },
+      realTimePower: (() => {
+        if (!dashboardData.realTimePower) {
+          throw new Error('MISSING DATA: realTimePower is required for power flow display');
+        }
+        return dashboardData.realTimePower as any;
+      })(),
+      batteryCapacity: (() => {
+        if (!dashboardData.batteryCapacity) {
+          throw new Error('MISSING DATA: batteryCapacity is required for battery capacity display');
+        }
+        return dashboardData.batteryCapacity;
+      })()
+    };
+  }, [dashboardData, inverterData]);
+
+  const isLoading = dashboardLoading || inverterLoading;
+  const error = dashboardError || inverterError;
+
+  if (isLoading) {
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {[...Array(3)].map((_, i) => (
+          <div key={i} className="border rounded-lg p-6 bg-gray-50 animate-pulse">
+            <div className="h-8 bg-gray-200 rounded mb-4"></div>
+            <div className="h-10 bg-gray-200 rounded mb-6"></div>
+            <div className="space-y-3">
+              <div className="h-5 bg-gray-200 rounded"></div>
+              <div className="h-5 bg-gray-200 rounded"></div>
+              <div className="h-5 bg-gray-200 rounded"></div>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-red-600 text-center p-4 border border-red-200 rounded-lg bg-red-50">
+        <AlertTriangle className="h-6 w-6 mx-auto mb-2" />
+        {error}
+      </div>
+    );
+  }
+
+  const cards = [
+    {
+      title: "Home Power",
+      icon: Zap,
+      color: "blue" as const,
+      keyMetric: "Solar Generation",
+      keyValue: statusData.realTimePower?.solarPower?.text || '0 W',
+      keyUnit: "",
+      keyAnnotation: undefined as string[] | undefined,
+      metrics: [
+        {
+          label: "Home Usage",
+          value: statusData.realTimePower?.homeLoadPower?.text || '0 W',
+          unit: "",
+          icon: Home
+        },
+        {
+          label: "Grid",
+          value: (statusData.realTimePower?.gridExportPower?.value || 0) > 0.1 ? `${statusData.realTimePower?.gridExportPower?.text} Export ↑` :
+                 (statusData.realTimePower?.gridImportPower?.value || 0) > 0.1 ? `${statusData.realTimePower?.gridImportPower?.text} Import ↓` : 'Balanced',
+          unit: "",
+          icon: Zap,
+          color: (statusData.realTimePower?.gridExportPower?.value || 0) > 0.1 ? 'green' as const :
+                 (statusData.realTimePower?.gridImportPower?.value || 0) > 0.1 ? 'red' as const : 'blue' as const,
+          pill: true
+        },
+        {
+          label: "Battery",
+          value: (statusData.realTimePower?.netBatteryPower?.value || 0) > 0.1 ? `${statusData.realTimePower?.batteryChargePower?.text} Charging ↑` :
+                 (statusData.realTimePower?.netBatteryPower?.value || 0) < -0.1 ? `${statusData.realTimePower?.batteryDischargePower?.text} Discharging ↓` : '0 W',
+          unit: "",
+          icon: Battery,
+          color: (statusData.realTimePower?.netBatteryPower?.value || 0) > 0.1 ? 'green' as const :
+                 (statusData.realTimePower?.netBatteryPower?.value || 0) < -0.1 ? 'yellow' as const : 'blue' as const,
+          pill: true
+        }
+      ]
+    },
+    {
+      title: "Battery",
+      icon: Battery,
+      color: "blue" as const,
+      keyMetric: "Strategic Intent",
+      keyValue: statusData.strategicIntent ?? 'Idle',
+      keyUnit: "",
+      keyAnnotation: undefined as string[] | undefined,
+      metrics: [
+        {
+          label: "State of Charge",
+          value: (() => {
+            if (!statusData.batteryStatus?.soc?.display) {
+              throw new Error('MISSING DATA: batterySoc.display is required for SOC display');
+            }
+            return statusData.batteryStatus.soc.display;
+          })(),
+          unit: "%",
+          icon: Battery
+        },
+        {
+          label: "State of Energy",
+          value: (() => {
+            if (!statusData.batteryStatus?.soe?.display) {
+              throw new Error('MISSING DATA: batterySoe.display is required for SOE display');
+            }
+            if (!statusData.batteryCapacity) {
+              throw new Error('MISSING DATA: batteryCapacity is required for SOE display');
+            }
+            return `${statusData.batteryStatus.soe.display}/${statusData.batteryCapacity}`;
+          })(),
+          unit: "kWh",
+          icon: Zap
+        },
+        ...(statusData.batteryStatus?.batteryMode ? [{
+          label: "Battery Mode",
+          value: (() => {
+            const mode = statusData.batteryStatus.batteryMode?.toLowerCase() ?? '';
+            switch (mode) {
+              case 'load_first': return 'Load First';
+              case 'battery_first': return 'Battery First';
+              case 'grid_first': return 'Grid First';
+              default: return statusData.batteryStatus.batteryMode ?? 'Unknown';
+            }
+          })(),
+          unit: "",
+          icon: Battery
+        }] : [])
+      ]
+    },
+    {
+      title: statusData.costAndSavings?.horizonDays === 2
+        ? "Cost & Savings (2 days)"
+        : "Today's Cost & Savings",
+      icon: DollarSign,
+      color: "blue" as const,
+      keyMetric: "Net Grid Cost",
+      // Issue #287: when a 2-day plan is active, the full-horizon total is
+      // the headline (a decision that defers value to tomorrow shouldn't
+      // look like a loss), with a Today/Tomorrow breakdown after it.
+      keyValue: statusData.costAndSavings?.horizonDays === 2
+        ? statusData.costAndSavings?.netGridCostFullHorizon?.text
+        : statusData.costAndSavings?.todaysCost?.text,
+      keyUnit: "",
+      keyAnnotation: statusData.costAndSavings?.horizonDays === 2
+        ? [
+            `Today: ${statusData.costAndSavings?.todaysCost?.text}`,
+            `Tomorrow: ${statusData.costAndSavings?.tomorrowCostText}`,
+          ]
+        : undefined,
+      metrics: [
+        {
+          label: "Grid-Only Cost",
+          value: statusData.costAndSavings?.gridOnlyCost?.text,
+          unit: "",
+          icon: DollarSign
+        },
+        {
+          label: "Net Savings",
+          value: statusData.costAndSavings?.horizonDays === 2
+            ? statusData.costAndSavings?.netSavingsFullHorizon?.text
+            : statusData.costAndSavings?.todaysSavings?.text,
+          unit: "",
+          icon: DollarSign,
+          color: (
+            (statusData.costAndSavings?.horizonDays === 2
+              ? statusData.costAndSavings?.netSavingsFullHorizon?.value
+              : statusData.costAndSavings?.todaysSavings?.value) || 0
+          ) >= 0 ? 'green' as const : 'red' as const,
+          breakdown: statusData.costAndSavings?.horizonDays === 2
+            ? [
+                `Today: ${statusData.costAndSavings?.todaysSavings?.text}`,
+                `Tomorrow: ${statusData.costAndSavings?.tomorrowSavingsText}`,
+              ]
+            : undefined
+        },
+        {
+          label: "Percentage Saved",
+          value: `${statusData.costAndSavings?.percentageSaved?.text} saved`,
+          unit: "",
+          icon: TrendingUp,
+          color: (statusData.costAndSavings?.percentageSaved?.value || 0) >= 0 ? 'green' as const : 'red' as const,
+          pill: true
+        }
+      ]
+    }
+  ];
+
+  return (
+    <div className={`grid grid-cols-1 lg:grid-cols-3 gap-6 ${className}`}>
+      {cards.map((card, index) => (
+        <StatusCard
+          key={index}
+          title={card.title}
+          icon={card.icon}
+          color={card.color}
+          keyMetric={card.keyMetric}
+          keyValue={card.keyValue}
+          keyUnit={card.keyUnit}
+          keyAnnotation={card.keyAnnotation}
+          metrics={card.metrics}
+          systemMode={systemMode}
+        />
+      ))}
+    </div>
+  );
+};
+
+export default SystemStatusCard;

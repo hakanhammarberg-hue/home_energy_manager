@@ -1,0 +1,45 @@
+// Single source of truth for reading a period's battery strategic intent.
+// The backend computes both fields (core/bess/strategic_intent.py,
+// core/bess/models.py's infer_intent_from_flows):
+// strategicIntent is the DP-planned intent (defaults to "IDLE" when no plan
+// covered the period), observedIntent is derived from real sensor flows and
+// is only set for actual/historical periods. Every UI surface that displays
+// or reasons about "what did the battery do this period" must resolve the
+// two the same way, or displays can disagree about the same period.
+
+export type StrategicIntent =
+  | 'GRID_CHARGING'
+  | 'SOLAR_STORAGE'
+  | 'LOAD_SUPPORT'
+  | 'BATTERY_EXPORT'
+  | 'SOLAR_EXPORT'
+  | 'IDLE';
+
+export interface IntentSource {
+  dataSource?: string;
+  strategicIntent?: string;
+  observedIntent?: string;
+  curtailed?: boolean;
+}
+
+export function getIntent(hour: IntentSource): StrategicIntent {
+  const raw =
+    hour.dataSource === 'actual' && hour.observedIntent
+      ? hour.observedIntent
+      : hour.strategicIntent;
+  return (raw as StrategicIntent) || 'IDLE';
+}
+
+// Planned PV curtailment (#501): grid_exported > 0 at a sell price below the
+// export curtailment floor while curtailment is active. Deliberately NOT
+// gated on getIntent() === 'SOLAR_EXPORT' -- the runtime's own gate
+// (battery_system_manager.py's _apply_period_schedule, see the comment on
+// its should_curtail condition) applies regardless of strategic_intent: a
+// period where the battery is still charging at its rate limit while the
+// surplus above that rate exports classifies as SOLAR_STORAGE, not
+// SOLAR_EXPORT, and can still be curtailed. The backend only ever sets
+// `curtailed` on planned/predicted periods (see core/bess/models.py
+// DecisionData.curtailed) -- actual/historical periods always report false.
+export function isCurtailed(hour: IntentSource): boolean {
+  return hour.curtailed === true;
+}

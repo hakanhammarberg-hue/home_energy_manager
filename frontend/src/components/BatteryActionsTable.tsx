@@ -1,0 +1,870 @@
+import React, { useState } from 'react';
+import { Battery, ChevronRight, Home, Sun, Zap } from 'lucide-react';
+import { FormattedValue } from '../types';
+import { useDashboardData } from '../hooks/useDashboardData';
+import { DataResolution } from '../hooks/useUserPreferences';
+import { periodToTimeString, periodToEndTime } from '../utils/timeUtils';
+import { getIntent, isCurtailed } from '../utils/intent';
+import { formatFixed } from '../utils/format';
+
+interface BatteryActionsTableProps {
+  resolution: DataResolution;
+  date?: string; // ISO date (YYYY-MM-DD); omit for today
+}
+
+// Column group styling — shared between today's and tomorrow's tables.
+// Conditions = what the optimizer observed, Battery = what it decided, Cost & Savings = the result.
+const GROUP_STYLES = {
+  conditions: 'bg-slate-100 dark:bg-slate-700/60 text-slate-700 dark:text-slate-300',
+  battery: 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300',
+  costSavings: 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300',
+} as const;
+
+const GroupedTableHeader: React.FC<{ variant?: 'default' | 'tomorrow' }> = ({ variant = 'default' }) => {
+  const base = 'px-3 py-1 text-xs font-semibold uppercase tracking-wider border border-gray-300 dark:border-gray-600';
+  const subBase = 'px-3 py-2 text-xs font-medium uppercase tracking-wider border border-gray-300 dark:border-gray-600';
+  const groups = variant === 'tomorrow'
+    ? {
+        conditions: 'bg-indigo-50/70 dark:bg-indigo-900/20 text-indigo-500 dark:text-indigo-400',
+        battery: 'bg-indigo-100/70 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-300',
+        costSavings: 'bg-indigo-50/70 dark:bg-indigo-900/20 text-indigo-500 dark:text-indigo-400',
+      }
+    : GROUP_STYLES;
+  const subGroups = variant === 'tomorrow'
+    ? { text: 'text-indigo-700 dark:text-indigo-300' }
+    : { text: 'text-gray-800 dark:text-gray-200' };
+
+  return (
+    <>
+      <tr>
+        <th colSpan={4} className={`${base} ${groups.conditions} text-left`}>Conditions</th>
+        <th colSpan={2} className={`${base} ${groups.battery} text-center`}>Battery</th>
+        <th colSpan={8} className={`${base} ${groups.costSavings} text-center`}>Cost &amp; Savings</th>
+      </tr>
+      <tr>
+        <th className={`w-[7%] ${subBase} ${subGroups.text} text-left`}>Hour</th>
+        <th className={`w-[5%] ${subBase} ${subGroups.text} text-center`}>Price</th>
+        <th className={`w-[8%] ${subBase} ${subGroups.text} text-center`}>Solar</th>
+        <th className={`w-[8%] ${subBase} ${subGroups.text} text-center`}>Consumption</th>
+        <th className={`w-[7%] ${subBase} ${subGroups.text} text-center`}>Battery Action</th>
+        <th className={`w-[7%] ${subBase} ${subGroups.text} text-center`}>Battery Level</th>
+        <th className={`w-[7.25%] ${subBase} ${subGroups.text} text-center`}>Grid Import</th>
+        <th className={`w-[7.25%] ${subBase} ${subGroups.text} text-center`}>Grid Export</th>
+        <th className={`w-[7.25%] ${subBase} ${subGroups.text} text-center`}>Import Cost</th>
+        <th className={`w-[7.25%] ${subBase} ${subGroups.text} text-center`}>Export Revenue</th>
+        <th className={`w-[7.25%] ${subBase} ${subGroups.text} text-center`}>Wear</th>
+        <th className={`w-[7.25%] ${subBase} ${subGroups.text} text-center`}>Total Cost</th>
+        <th className={`w-[7.25%] ${subBase} ${subGroups.text} text-center`}>Baseline Cost</th>
+        <th className={`w-[7.25%] ${subBase} ${subGroups.text} text-center`}>Savings</th>
+      </tr>
+    </>
+  );
+};
+
+// Single cost/revenue figure with a tone that reflects whether it's money out, money in, or neutral.
+const CostValueCell: React.FC<{ value: any; tone: 'cost' | 'revenue' | 'neutral' }> = ({ value, tone }) => {
+  const amount = value?.value ?? 0;
+  const hasAmount = amount > 0.001;
+  const toneClass = !hasAmount
+    ? 'text-gray-400 dark:text-gray-500'
+    : tone === 'cost'
+      ? 'text-red-600 dark:text-red-400'
+      : tone === 'revenue'
+        ? 'text-green-600 dark:text-green-400'
+        : 'text-gray-600 dark:text-gray-300';
+
+  return (
+    <>
+      <div className={`font-medium ${toneClass}`}>{value?.display ?? formatFixed(amount, 2)}</div>
+      <div className="text-xs text-gray-500 dark:text-gray-400">{value?.unit}</div>
+    </>
+  );
+};
+
+export const BatteryActionsTable: React.FC<BatteryActionsTableProps> = ({ resolution, date }) => {
+  const { data: dashboardData, loading, error } = useDashboardData(date, resolution);
+  const [showTomorrow, setShowTomorrow] = useState(false);
+
+  // Helper function to get numeric value from FormattedValue objects (for calculations)
+  const getNumericValue = (field: any) => {
+    if (typeof field === 'object' && field?.value !== undefined) {
+      return field.value;
+    }
+    return field || 0;
+  };
+
+  // Helper function to get formatted text from FormattedValue objects (for display)
+  const getFormattedText = (field: any) => {
+    if (typeof field === 'object' && field?.text !== undefined) {
+      return field.text;
+    }
+    // Fallback for legacy or raw numeric values
+    if (typeof field === 'number') {
+      return formatFixed(field, 2);
+    }
+    return field || 'N/A';
+  };
+
+  // Helper function to get display value (without unit) from FormattedValue objects
+  const getDisplayValue = (field: any) => {
+    if (typeof field === 'object' && field?.display !== undefined) {
+      return field.display;
+    }
+    return field || 'N/A';
+  };
+
+  // Helper function to get unit from FormattedValue objects - NO FALLBACKS for determinism
+  const getUnit = (field: any) => {
+    if (typeof field === 'object' && field?.unit !== undefined) {
+      // Convert Wh to kWh for display
+      return field.unit === 'Wh' ? 'kWh' : field.unit;
+    }
+    // No fallback - if unit is missing, it indicates a backend configuration issue
+    return '???';
+  };
+
+  if (loading) {
+    return (
+      <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+        <div className="flex items-center justify-center h-32">
+          <div className="animate-spin h-8 w-8 border-2 border-blue-500 rounded-full border-t-transparent"></div>
+          <span className="ml-2 text-gray-900 dark:text-white">Loading schedule...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-4">
+          <h3 className="text-red-800 dark:text-red-200 font-medium">Error Loading Schedule</h3>
+          <p className="text-red-600 dark:text-red-300 mt-1">{error}</p>
+          <button 
+            onClick={() => window.location.reload()} 
+            className="mt-2 px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!dashboardData || !dashboardData.hourlyData) {
+    return (
+      <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+        <div className="text-center text-gray-500 dark:text-gray-400">No schedule data available</div>
+      </div>
+    );
+  }
+
+  // Use backend-calculated summary data instead of frontend calculations
+
+  // Get final hour for SOC display
+  const finalHour = dashboardData.hourlyData[dashboardData.hourlyData.length - 1];
+
+  // Cost breakdown totals aren't in the backend summary yet — sum the per-hour
+  // backend-calculated values (pure addition, no re-derivation of the cost formula).
+  const costUnit = dashboardData.hourlyData[0]?.importCost?.unit ?? '';
+  const totalImportCost = dashboardData.hourlyData.reduce(
+    (sum: number, h: any) => sum + getNumericValue(h.importCost), 0
+  );
+  const totalExportRevenue = dashboardData.hourlyData.reduce(
+    (sum: number, h: any) => sum + getNumericValue(h.exportRevenue), 0
+  );
+  const totalWear = dashboardData.hourlyData.reduce(
+    (sum: number, h: any) => sum + getNumericValue(h.batteryCycleCost), 0
+  );
+
+  return (
+    <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow overflow-x-auto">
+      <div className="mb-6">
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">Battery Actions</h2>
+        <p className="text-sm text-gray-600 dark:text-gray-300">
+          {date ? 'Historical day — all periods are actual.' : 'Current hour highlighted in purple.'}
+        </p>
+      </div>
+
+      {/* Simplified Hourly Table */}
+      <table className="min-w-full table-fixed divide-y divide-gray-200 dark:divide-gray-700">
+        <thead>
+          <GroupedTableHeader />
+        </thead>
+        <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+          {dashboardData.hourlyData.map((hour: any, index: number) => {
+            const isCurrentPeriod = hour.period === dashboardData.currentPeriod;
+            const isActual = hour.dataSource === 'actual';
+
+            // Row styling based on actual/predicted/current
+            let rowClass = '';
+            let firstCellClass = 'px-3 py-2 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white border-t border-r border-b border-gray-300 dark:border-gray-600 ';
+
+            if (isCurrentPeriod) {
+              rowClass = 'bg-purple-50 dark:bg-purple-900/20';
+              firstCellClass += 'border-l-4 border-l-purple-400';
+            } else if (isActual) {
+              rowClass = 'bg-gray-50 dark:bg-gray-700';
+              firstCellClass += 'border-l-4 border-l-green-400';
+            } else {
+              rowClass = 'bg-white dark:bg-gray-800';
+              firstCellClass += 'border-l border-l-gray-300 dark:border-l-gray-600';
+            }
+
+            return (
+              <tr key={index} className={rowClass}>
+                <td className={firstCellClass}>
+                  <div className="flex items-center">
+                    <div className="text-right">
+                      <div>{periodToTimeString(hour.period, resolution)}</div>
+                      <div className="text-xs text-gray-400 dark:text-gray-500">{periodToEndTime(hour.period, resolution)}</div>
+                    </div>
+                    {isCurrentPeriod ? (
+                      <span className="ml-2 text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 px-2 py-1 rounded">
+                        Current
+                      </span>
+                    ) : isActual ? (
+                      <span className="ml-2 text-xs bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 px-2 py-1 rounded">
+                        Actual
+                      </span>
+                    ) : (
+                      <span className="ml-2 text-xs bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 rounded">
+                        Predicted
+                      </span>
+                    )}
+                  </div>
+                </td>
+                
+                <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                  <div className="font-medium">{getDisplayValue(hour.buyPrice)}</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.buyPrice)}</div>
+                </td>
+                
+                <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                  <div className="flex items-center">
+                    <div className="flex-1" />
+                    <div className="flex-none text-center">
+                      <div className={`font-medium ${getNumericValue(hour.solarProduction) >= 0.05 ? 'text-yellow-600 dark:text-yellow-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                        {getDisplayValue(hour.solarProduction)}
+                      </div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.solarProduction)}</div>
+                    </div>
+                    <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                      {(hour.solarToHome?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Home className="h-2.5 w-2.5" />
+                          {hour.solarToHome?.display}
+                        </span>
+                      )}
+                      {(hour.solarToBattery?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Battery className="h-2.5 w-2.5" />
+                          {hour.solarToBattery?.display}
+                        </span>
+                      )}
+                      {(hour.solarToGrid?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Zap className="h-2.5 w-2.5" />
+                          {hour.solarToGrid?.display}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </td>
+
+                <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                  <div className="flex items-center">
+                    <div className="flex-1" />
+                    <div className="flex-none text-center">
+                      <div className="font-medium">{getDisplayValue(hour.homeConsumption)}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.homeConsumption)}</div>
+                    </div>
+                    <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                      {(hour.solarToHome?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Sun className="h-2.5 w-2.5" />
+                          {hour.solarToHome?.display}
+                        </span>
+                      )}
+                      {(hour.batteryToHome?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Battery className="h-2.5 w-2.5" />
+                          {hour.batteryToHome?.display}
+                        </span>
+                      )}
+                      {(hour.gridToHome?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Zap className="h-2.5 w-2.5" />
+                          {hour.gridToHome?.display}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </td>
+                
+                <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                  <div className="flex items-center">
+                    <div className="flex-1" />
+                    <div className="flex-none flex flex-col items-center space-y-1">
+                      {getNumericValue(hour.batteryCharged) > 0.01 && (
+                        <span className="text-sm font-medium text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/30 px-2 py-1 rounded flex items-center">
+                          <Zap className="h-3 w-3 mr-1" />
+                          +{getDisplayValue(hour.batteryCharged)}
+                        </span>
+                      )}
+                      {getNumericValue(hour.batteryDischarged) > 0.01 && (
+                        <span className="text-sm font-medium text-orange-600 dark:text-orange-400 bg-orange-100 dark:bg-orange-900/30 px-2 py-1 rounded flex items-center">
+                          <Zap className="h-3 w-3 mr-1" />
+                          -{getDisplayValue(hour.batteryDischarged)}
+                        </span>
+                      )}
+                      {getNumericValue(hour.batteryCharged) <= 0.01 && getNumericValue(hour.batteryDischarged) <= 0.01 && (
+                        <span className="text-sm text-gray-500 dark:text-gray-400">—</span>
+                      )}
+                      <div className="text-xs text-gray-500 dark:text-gray-400">kWh</div>
+                    </div>
+                    <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                      {(hour.solarToBattery?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Sun className="h-2.5 w-2.5" />
+                          {hour.solarToBattery?.display}
+                        </span>
+                      )}
+                      {(hour.gridToBattery?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Zap className="h-2.5 w-2.5" />
+                          {hour.gridToBattery?.display}
+                        </span>
+                      )}
+                      {(hour.batteryToHome?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Home className="h-2.5 w-2.5" />
+                          {hour.batteryToHome?.display}
+                        </span>
+                      )}
+                      {getIntent(hour) === 'BATTERY_EXPORT' && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Zap className="h-2.5 w-2.5" />
+                          {hour.batteryToGrid?.display}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </td>
+
+                <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                  <div className="font-medium">{getFormattedText(hour.batterySocEnd)}</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">
+                    {getFormattedText(hour.batterySoeEnd) || 'N/A'}
+                  </div>
+                </td>
+                
+                <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                  <div className="flex items-center">
+                    <div className="flex-1" />
+                    <div className="flex-none text-center">
+                      <div className={`font-medium ${getNumericValue(hour.gridImported) >= 0.05 ? 'text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                        {getDisplayValue(hour.gridImported)}
+                      </div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.gridImported)}</div>
+                    </div>
+                    <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                      {(hour.gridToHome?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Home className="h-2.5 w-2.5" />
+                          {hour.gridToHome?.display}
+                        </span>
+                      )}
+                      {(hour.gridToBattery?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Battery className="h-2.5 w-2.5" />
+                          {hour.gridToBattery?.display}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </td>
+
+                <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                  <div className="flex items-center">
+                    <div className="flex-1" />
+                    <div className="flex-none text-center">
+                      <div className={`font-medium ${isCurtailed(hour) ? 'text-stone-500 dark:text-stone-400' : getNumericValue(hour.gridExported) >= 0.05 ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                        {getDisplayValue(hour.gridExported)}
+                      </div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.gridExported)}</div>
+                    </div>
+                    <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                      {isCurtailed(hour) && (
+                        <span className="text-xs font-medium bg-stone-200 dark:bg-stone-700 text-stone-800 dark:text-stone-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          Curtailed
+                        </span>
+                      )}
+                      {(hour.solarToGrid?.value ?? 0) > 0.05 && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Sun className="h-2.5 w-2.5" />
+                          {hour.solarToGrid?.display}
+                        </span>
+                      )}
+                      {getIntent(hour) === 'BATTERY_EXPORT' && (
+                        <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                          <Battery className="h-2.5 w-2.5" />
+                          {hour.batteryToGrid?.display}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </td>
+
+                <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                  <CostValueCell value={hour.importCost} tone="cost" />
+                </td>
+
+                <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                  <CostValueCell value={hour.exportRevenue} tone="revenue" />
+                </td>
+
+                <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                  <CostValueCell value={hour.batteryCycleCost} tone="neutral" />
+                </td>
+
+                <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                  <CostValueCell value={hour.hourlyCost} tone="cost" />
+                </td>
+
+                <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                  <CostValueCell value={hour.solarOnlyCost} tone="neutral" />
+                </td>
+
+                <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                  <div className={`font-medium ${
+                    Math.abs(getNumericValue(hour.hourlySavings)) < 0.01 ? 'text-gray-900 dark:text-white' :
+                    getNumericValue(hour.hourlySavings) > 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
+                  }`}>
+                    {getDisplayValue(hour.hourlySavings)}
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.hourlySavings)}</div>
+                </td>
+              </tr>
+            );
+          })}
+          
+          {/* Totals Row */}
+          <tr className="bg-gray-100 dark:bg-gray-600 font-semibold border-t-2 border-gray-400 dark:border-gray-500">
+            <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600">
+              TOTAL
+            </td>
+            
+            <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+              <div className="text-xs text-gray-500 dark:text-gray-400">AVG</div>
+              <div className="font-medium">{getDisplayValue(dashboardData.summary?.averagePrice)}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(dashboardData.summary?.averagePrice)}</div>
+            </td>
+
+            <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium text-yellow-600 dark:text-yellow-400">
+                {getDisplayValue(dashboardData.summary?.totalSolarProduction)}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(dashboardData.summary?.totalSolarProduction)}</div>
+            </td>
+
+            <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium">
+                {getDisplayValue(dashboardData.summary?.totalHomeConsumption)}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(dashboardData.summary?.totalHomeConsumption)}</div>
+            </td>
+            
+            <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+              <div className="flex flex-col items-center">
+                <div className="text-sm mb-1 text-blue-600 dark:text-blue-400 font-medium">
+                  +{getDisplayValue(dashboardData.summary?.totalBatteryCharged)}
+                </div>
+                <div className="text-sm text-orange-600 dark:text-orange-400 font-medium">
+                  -{getDisplayValue(dashboardData.summary?.totalBatteryDischarged)}
+                </div>
+                <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  {getUnit(dashboardData.summary?.totalBatteryCharged)}
+                </div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  Net: {getDisplayValue(dashboardData.summary?.netBatteryAction)}
+                </div>
+              </div>
+            </td>
+            
+            <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Final</div>
+              <div className="font-medium">
+                {finalHour ? getFormattedText(finalHour.batterySocEnd) : '-'}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                {getFormattedText(dashboardData.summary?.finalBatterySoe) || getFormattedText(finalHour?.batterySoeEnd) || 'N/A'}
+              </div>
+            </td>
+            
+            <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium text-red-600 dark:text-red-400">
+                {getDisplayValue(dashboardData.summary?.totalGridImported)}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(dashboardData.summary?.totalGridImported)}</div>
+            </td>
+
+            <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium text-green-600 dark:text-green-400">
+                {getDisplayValue(dashboardData.summary?.totalGridExported)}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(dashboardData.summary?.totalGridExported)}</div>
+            </td>
+
+            <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium text-red-600 dark:text-red-400">{formatFixed(totalImportCost, 2)}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{costUnit}</div>
+            </td>
+
+            <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium text-green-600 dark:text-green-400">{formatFixed(totalExportRevenue, 2)}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{costUnit}</div>
+            </td>
+
+            <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium text-gray-600 dark:text-gray-300">{formatFixed(totalWear, 2)}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{costUnit}</div>
+            </td>
+
+            <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium text-red-600 dark:text-red-400">
+                {getDisplayValue(dashboardData.summary?.optimizedCost)}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(dashboardData.summary?.optimizedCost)}</div>
+            </td>
+
+            <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium text-gray-600 dark:text-gray-300">
+                {getDisplayValue(dashboardData.summary?.solarOnlyCost)}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(dashboardData.summary?.solarOnlyCost)}</div>
+            </td>
+
+            <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+              <div className="font-medium text-green-600 dark:text-green-400">
+                {getDisplayValue(dashboardData.summary?.totalSavings)}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(dashboardData.summary?.totalSavings)}</div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      {/* Explanation */}
+      <div className="mt-4 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg text-sm space-y-2">
+        <p className="text-gray-600 dark:text-gray-300">
+          Battery actions: <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-1 rounded">blue = charging</span>,
+          <span className="bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-300 px-1 rounded">orange = discharging</span>.
+          The "Savings" column shows hourly optimization: positive (green) = money saved,
+          zero (black) = break-even, negative (red) = additional cost that hour.
+        </p>
+        <p className="text-gray-500 dark:text-gray-400 text-xs border-t border-gray-200 dark:border-gray-600 pt-2">
+          This is the algorithm's own view of cost, including battery wear — it's what the optimizer
+          weighs when deciding whether to charge or discharge. It's not the same number as the
+          <strong className="text-gray-600 dark:text-gray-300"> Net Savings</strong> shown on the Savings page,
+          which compares actual grid cost to a no-battery baseline and excludes wear.
+        </p>
+      </div>
+
+      {/* Tomorrow's Projected Savings */}
+      {dashboardData.tomorrowData && dashboardData.tomorrowData.length > 0 && (() => {
+        const tomorrowGridOnlyCost = dashboardData.tomorrowData!.reduce(
+          (sum: number, h: any) => sum + getNumericValue(h.gridOnlyCost), 0
+        );
+        const tomorrowOptimizedCost = dashboardData.tomorrowData!.reduce(
+          (sum: number, h: any) => sum + getNumericValue(h.hourlyCost), 0
+        );
+        const tomorrowSavings = tomorrowGridOnlyCost - tomorrowOptimizedCost;
+        const currencyUnit = dashboardData.tomorrowData![0]?.hourlyCost?.unit || '???';
+
+        return (
+          <div className="mt-6">
+            <button
+              onClick={() => setShowTomorrow(!showTomorrow)}
+              className="flex items-center gap-2 text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:text-indigo-900 dark:hover:text-indigo-100 transition-colors"
+            >
+              <ChevronRight className={`h-4 w-4 transition-transform ${showTomorrow ? 'rotate-90' : ''}`} />
+              Tomorrow&apos;s Projected Savings ({dashboardData.tomorrowData!.length} periods)
+            </button>
+
+            {showTomorrow && (
+              <div className="mt-4 pt-4 border-t-2 border-indigo-200 dark:border-indigo-800">
+                {/* Tomorrow Summary Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 opacity-75">
+                  <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg text-center border border-blue-200 dark:border-blue-800">
+                    <div className="text-2xl font-bold text-gray-900 dark:text-white">
+                      {formatFixed(tomorrowGridOnlyCost, 2)}
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">{currencyUnit}</div>
+                    <div className="text-sm text-gray-600 dark:text-gray-300">Grid-Only Cost</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">Without solar or battery</div>
+                  </div>
+
+                  <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-lg text-center border border-green-200 dark:border-green-800">
+                    <div className="text-2xl font-bold text-gray-900 dark:text-white">
+                      {formatFixed(tomorrowOptimizedCost, 2)}
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">{currencyUnit}</div>
+                    <div className="text-sm text-gray-600 dark:text-gray-300">Optimized Cost</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">With solar &amp; battery</div>
+                  </div>
+
+                  <div className="bg-purple-50 dark:bg-purple-900/20 p-4 rounded-lg text-center border border-purple-200 dark:border-purple-800">
+                    <div className={`text-2xl font-bold ${tomorrowSavings >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                      {formatFixed(tomorrowSavings, 2)}
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">{currencyUnit}</div>
+                    <div className="text-sm text-gray-600 dark:text-gray-300">Projected Savings</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">
+                      {tomorrowGridOnlyCost > 0 ? `${formatFixed((tomorrowSavings / tomorrowGridOnlyCost) * 100, 1)}%` : '0%'}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Tomorrow Hourly Table */}
+                <table className="min-w-full table-fixed divide-y divide-gray-200 dark:divide-gray-700 opacity-75">
+                  <thead>
+                    <GroupedTableHeader variant="tomorrow" />
+                  </thead>
+                  <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                    {dashboardData.tomorrowData!.map((hour: any, index: number) => (
+                      <tr key={index} className="bg-white dark:bg-gray-800">
+                        <td className="px-3 py-2 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600">
+                          <div className="flex items-center">
+                            <div className="text-right">
+                              <div>{periodToTimeString(hour.period, resolution)}</div>
+                              <div className="text-xs text-gray-400 dark:text-gray-500">{periodToEndTime(hour.period, resolution)}</div>
+                            </div>
+                            <span className="ml-2 text-xs bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 px-2 py-1 rounded">
+                              Predicted
+                            </span>
+                          </div>
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                          <div className="font-medium">{getDisplayValue(hour.buyPrice)}</div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.buyPrice)}</div>
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                          <div className="flex items-center">
+                            <div className="flex-1" />
+                            <div className="flex-none text-center">
+                              <div className={`font-medium ${getNumericValue(hour.solarProduction) >= 0.05 ? 'text-yellow-600 dark:text-yellow-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                                {getDisplayValue(hour.solarProduction)}
+                              </div>
+                              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.solarProduction)}</div>
+                            </div>
+                            <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                              {(hour.solarToHome?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Home className="h-2.5 w-2.5" />
+                                  {hour.solarToHome?.display}
+                                </span>
+                              )}
+                              {(hour.solarToBattery?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Battery className="h-2.5 w-2.5" />
+                                  {hour.solarToBattery?.display}
+                                </span>
+                              )}
+                              {(hour.solarToGrid?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Zap className="h-2.5 w-2.5" />
+                                  {hour.solarToGrid?.display}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                          <div className="flex items-center">
+                            <div className="flex-1" />
+                            <div className="flex-none text-center">
+                              <div className="font-medium">{getDisplayValue(hour.homeConsumption)}</div>
+                              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.homeConsumption)}</div>
+                            </div>
+                            <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                              {(hour.solarToHome?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Sun className="h-2.5 w-2.5" />
+                                  {hour.solarToHome?.display}
+                                </span>
+                              )}
+                              {(hour.batteryToHome?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Battery className="h-2.5 w-2.5" />
+                                  {hour.batteryToHome?.display}
+                                </span>
+                              )}
+                              {(hour.gridToHome?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Zap className="h-2.5 w-2.5" />
+                                  {hour.gridToHome?.display}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                          <div className="flex items-center">
+                            <div className="flex-1" />
+                            <div className="flex-none flex flex-col items-center space-y-1">
+                              {getNumericValue(hour.batteryCharged) > 0.01 && (
+                                <span className="text-sm font-medium text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/30 px-2 py-1 rounded flex items-center">
+                                  <Zap className="h-3 w-3 mr-1" />
+                                  +{getDisplayValue(hour.batteryCharged)}
+                                </span>
+                              )}
+                              {getNumericValue(hour.batteryDischarged) > 0.01 && (
+                                <span className="text-sm font-medium text-orange-600 dark:text-orange-400 bg-orange-100 dark:bg-orange-900/30 px-2 py-1 rounded flex items-center">
+                                  <Zap className="h-3 w-3 mr-1" />
+                                  -{getDisplayValue(hour.batteryDischarged)}
+                                </span>
+                              )}
+                              {getNumericValue(hour.batteryCharged) <= 0.01 && getNumericValue(hour.batteryDischarged) <= 0.01 && (
+                                <span className="text-sm text-gray-500 dark:text-gray-400">&mdash;</span>
+                              )}
+                              <div className="text-xs text-gray-500 dark:text-gray-400">kWh</div>
+                            </div>
+                            <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                              {(hour.solarToBattery?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Sun className="h-2.5 w-2.5" />
+                                  {hour.solarToBattery?.display}
+                                </span>
+                              )}
+                              {(hour.gridToBattery?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Zap className="h-2.5 w-2.5" />
+                                  {hour.gridToBattery?.display}
+                                </span>
+                              )}
+                              {(hour.batteryToHome?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Home className="h-2.5 w-2.5" />
+                                  {hour.batteryToHome?.display}
+                                </span>
+                              )}
+                              {getIntent(hour) === 'BATTERY_EXPORT' && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Zap className="h-2.5 w-2.5" />
+                                  {hour.batteryToGrid?.display}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                          <div className="font-medium">{getFormattedText(hour.batterySocEnd)}</div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            {getFormattedText(hour.batterySoeEnd) || 'N/A'}
+                          </div>
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                          <div className="flex items-center">
+                            <div className="flex-1" />
+                            <div className="flex-none text-center">
+                              <div className={`font-medium ${getNumericValue(hour.gridImported) >= 0.05 ? 'text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                                {getDisplayValue(hour.gridImported)}
+                              </div>
+                              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.gridImported)}</div>
+                            </div>
+                            <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                              {(hour.gridToHome?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Home className="h-2.5 w-2.5" />
+                                  {hour.gridToHome?.display}
+                                </span>
+                              )}
+                              {(hour.gridToBattery?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Battery className="h-2.5 w-2.5" />
+                                  {hour.gridToBattery?.display}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 text-center">
+                          <div className="flex items-center">
+                            <div className="flex-1" />
+                            <div className="flex-none text-center">
+                              <div className={`font-medium ${isCurtailed(hour) ? 'text-stone-500 dark:text-stone-400' : getNumericValue(hour.gridExported) >= 0.05 ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                                {getDisplayValue(hour.gridExported)}
+                              </div>
+                              <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.gridExported)}</div>
+                            </div>
+                            <div className="flex-1 flex flex-col items-start gap-0.5 pl-1">
+                              {isCurtailed(hour) && (
+                                <span className="text-xs font-medium bg-stone-200 dark:bg-stone-700 text-stone-800 dark:text-stone-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  Curtailed
+                                </span>
+                              )}
+                              {(hour.solarToGrid?.value ?? 0) > 0.05 && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Sun className="h-2.5 w-2.5" />
+                                  {hour.solarToGrid?.display}
+                                </span>
+                              )}
+                              {getIntent(hour) === 'BATTERY_EXPORT' && (
+                                <span className="text-xs font-medium bg-slate-100 dark:bg-slate-900/30 text-slate-700 dark:text-slate-300 px-1 py-0 rounded flex items-center gap-0.5">
+                                  <Battery className="h-2.5 w-2.5" />
+                                  {hour.batteryToGrid?.display}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                          <CostValueCell value={hour.importCost} tone="cost" />
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                          <CostValueCell value={hour.exportRevenue} tone="revenue" />
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                          <CostValueCell value={hour.batteryCycleCost} tone="neutral" />
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                          <CostValueCell value={hour.hourlyCost} tone="cost" />
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                          <CostValueCell value={hour.solarOnlyCost} tone="neutral" />
+                        </td>
+
+                        <td className="px-3 py-2 whitespace-nowrap text-sm border border-gray-300 dark:border-gray-600 text-center">
+                          <div className={`font-medium ${
+                            Math.abs(getNumericValue(hour.hourlySavings)) < 0.01 ? 'text-gray-900 dark:text-white' :
+                            getNumericValue(hour.hourlySavings) > 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
+                          }`}>
+                            {getDisplayValue(hour.hourlySavings)}
+                          </div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400">{getUnit(hour.hourlySavings)}</div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+    </div>
+  );
+};

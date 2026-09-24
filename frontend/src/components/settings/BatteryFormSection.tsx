@@ -1,0 +1,168 @@
+import React, { useState } from 'react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
+import { numField, SectionCard, toggle } from './FormHelpers';
+
+export interface BatteryForm {
+  totalCapacity: number;
+  minSoc: number;
+  maxSoc: number;
+  maxChargeDischargePowerKw: number;
+  cycleCostPerKwh: number;
+  efficiencyCharge: number;
+  efficiencyDischarge: number;
+  temperatureDeratingEnabled: boolean;
+  inverterMaxAcPowerKw: number;
+  inverterAcPowerMargin: number;
+  exportCurtailmentEnabled: boolean;
+  exportCurtailmentPriceFloor: number;
+}
+
+interface Props {
+  form: BatteryForm;
+  onChange: (f: BatteryForm) => void;
+  currency?: string;
+  weatherEntity?: string;
+  /** Hide the advanced settings section (efficiency, derating). Used by the wizard. */
+  hideAdvanced?: boolean;
+}
+
+export function BatteryFormSection({
+  form, onChange, currency = '', weatherEntity = '', hideAdvanced = false,
+}: Props) {
+  const [effOpen, setEffOpen] = useState(false);
+
+  return (
+    <div className="space-y-3">
+      <SectionCard
+        title="Capacity & SOC Limits"
+        description="Total battery capacity in kWh — set this to match your actual battery exactly. Min/Max SOC values are synced to the inverter and define the operating range the optimizer will stay within."
+      >
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {numField('Total Capacity', form.totalCapacity,
+            v => onChange({ ...form, totalCapacity: v }), { unit: 'kWh', min: 1, step: 0.1 })}
+          {numField('Min SOC', form.minSoc,
+            v => onChange({ ...form, minSoc: v }), { unit: '%', min: 0, max: 100, step: 1 })}
+          {numField('Max SOC', form.maxSoc,
+            v => onChange({ ...form, maxSoc: v }), { unit: '%', min: 0, max: 100, step: 1 })}
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="Power"
+        description="Maximum charge and discharge power available to the optimizer. Calculate from your battery's C-rate: e.g. 30 kWh × 0.5C = 15 kW."
+      >
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {numField('Max Charge / Discharge Power', form.maxChargeDischargePowerKw,
+            v => onChange({ ...form, maxChargeDischargePowerKw: v }), { unit: 'kW', min: 0, step: 0.1 })}
+        </div>
+      </SectionCard>
+
+      {/* Advanced settings collapsible — hidden in wizard mode since these
+          fields are not sent by the wizard completion payload */}
+      {!hideAdvanced && <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setEffOpen(o => !o)}
+          className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 dark:hover:bg-gray-700/40 transition-colors text-left"
+        >
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Advanced settings</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+              Cycle cost, efficiency factors and temperature derating
+            </p>
+          </div>
+          {effOpen
+            ? <ChevronUp className="h-4 w-4 text-gray-400 flex-shrink-0" />
+            : <ChevronDown className="h-4 w-4 text-gray-400 flex-shrink-0" />}
+        </button>
+        {effOpen && (
+          <div className="border-t border-gray-100 dark:border-gray-700 px-5 py-4 space-y-4">
+            {numField('Cycle Cost', form.cycleCostPerKwh,
+              v => onChange({ ...form, cycleCostPerKwh: v }),
+              { unit: `${currency}/kWh`, min: 0, step: 0.001 })}
+            <p className="text-xs text-gray-500 dark:text-gray-400 -mt-2">
+              Represents battery wear — a small cost added to every kWh cycled. Used by the optimizer
+              to decide whether a charge/discharge cycle is worth doing given the price spread. A higher
+              value makes cycles less attractive and reduces unnecessary wear.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {numField('Charge Efficiency', form.efficiencyCharge,
+                v => onChange({ ...form, efficiencyCharge: v }), { unit: '%', min: 0, max: 100, step: 0.1 })}
+              {numField('Discharge Efficiency', form.efficiencyDischarge,
+                v => onChange({ ...form, efficiencyDischarge: v }), { unit: '%', min: 0, max: 100, step: 0.1 })}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {numField('Inverter Max AC Power', form.inverterMaxAcPowerKw,
+                v => onChange({ ...form, inverterMaxAcPowerKw: v }),
+                { unit: 'kW — 0 disables', min: 0, step: 0.1 })}
+              {numField('Clipping Margin', form.inverterAcPowerMargin,
+                v => onChange({ ...form, inverterAcPowerMargin: v }),
+                { unit: 'fraction 0–0.9', min: 0, max: 0.9, step: 0.01 })}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400 -mt-2">
+              For DC-coupled solar on a hybrid inverter whose total AC output is capped
+              (e.g. 5 kW on a Growatt MIN 5000TL-XH). When set, the optimizer treats solar
+              above the cap as lost unless the battery has room to absorb it DC-side, and
+              will defer charging (holding via SOLAR_EXPORT periods) to keep headroom for
+              the midday peak. Requires per-period charge-rate control (Growatt MIN).
+              The margin is a model-side haircut on the cap that compensates for hourly
+              forecasts hiding short peaks; it never changes what is written to hardware.
+            </p>
+            {toggle('Curtail PV export at negative price', form.exportCurtailmentEnabled,
+              v => onChange({ ...form, exportCurtailmentEnabled: v }))}
+            {form.exportCurtailmentEnabled && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {numField('Curtailment Price Floor', form.exportCurtailmentPriceFloor,
+                  v => onChange({ ...form, exportCurtailmentPriceFloor: v }),
+                  { unit: `${currency || 'currency'}/kWh`, step: 0.01 })}
+              </div>
+            )}
+            <p className="text-xs text-gray-500 dark:text-gray-400 -mt-2">
+              Requires a grid CT/smart meter and hardware support (currently Growatt
+              GEN2/GEN3/GEN4 via solax_modbus only). When the sell price drops below the
+              floor and the inverter is still exporting, the export-limit register throttles
+              PV production at the panel instead of paying to export. Unsupported platforms
+              ignore this setting.
+            </p>
+            {toggle('Enable temperature derating', form.temperatureDeratingEnabled,
+              v => onChange({ ...form, temperatureDeratingEnabled: v }))}
+            {form.temperatureDeratingEnabled && (
+              <>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Uses the weather entity to derate charging power in cold temperatures (LFP protection).
+                  Configure the weather entity in the <strong>Sensors</strong> tab under Weather Integration.
+                  {weatherEntity && (
+                    <span className="ml-1 text-green-600 dark:text-green-400">Current: {weatherEntity}</span>
+                  )}
+                </p>
+                <div>
+                  <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">
+                    Derating curve (LFP default, read-only)
+                  </p>
+                  <div className="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-50 dark:bg-gray-700/50">
+                        <tr>
+                          <th className="px-3 py-1.5 text-left font-medium text-gray-500 dark:text-gray-400">Temperature</th>
+                          <th className="px-3 py-1.5 text-left font-medium text-gray-500 dark:text-gray-400">Max charge rate</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                        {[[-1, 20], [0, 20], [5, 50], [10, 80], [15, 100]].map(([temp, rate]) => (
+                          <tr key={temp} className="bg-white dark:bg-gray-800">
+                            <td className="px-3 py-1.5 text-gray-700 dark:text-gray-300">{temp}°C</td>
+                            <td className="px-3 py-1.5 text-gray-700 dark:text-gray-300">{rate}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>}
+    </div>
+  );
+}

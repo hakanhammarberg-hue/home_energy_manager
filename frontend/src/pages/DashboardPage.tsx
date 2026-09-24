@@ -1,0 +1,499 @@
+import { useState, useEffect, useCallback } from 'react';
+import { BatteryLevelChart } from '../components/BatteryLevelChart';
+import { EnergyFlowChart } from '../components/EnergyFlowChart';
+import { BatteryModeTimeline } from '../components/BatteryModeTimeline';
+import { BatterySettings, ElectricitySettings } from '../types';
+import { Clock, AlertCircle } from 'lucide-react';
+import EnergyFlowCards from '../components/EnergyFlowCards';
+import SystemStatusCard from '../components/SystemStatusCard';
+import PerificPowerCard from '../components/PerificPowerCard';
+import GovernorStatusCard from '../components/GovernorStatusCard';
+import EvSchedulerStatusCard from '../components/EvSchedulerStatusCard';
+import NibeStatusCard from '../components/NibeStatusCard';
+import BatterySocRangeCard from '../components/BatterySocRangeCard';
+import InverterWriteAccessCard from '../components/InverterWriteAccessCard';
+import AlertBanner from '../components/AlertBanner';
+import { RuntimeFailureAlerts } from '../components/RuntimeFailureAlerts';
+import api from '../lib/api';
+import { useUserPreferences } from '../hooks/useUserPreferences';
+import { useRuntimeFailures } from '../hooks/useRuntimeFailures';
+import { useHealthRecoveries } from '../hooks/useHealthRecoveries';
+
+interface DashboardProps {
+  onLoadingChange: (loading: boolean) => void;
+  settings: BatterySettings & ElectricitySettings;
+}
+
+export default function DashboardPage({
+  onLoadingChange,
+  settings
+}: DashboardProps) {
+  // Define a proper type for dashboard data
+  interface DashboardData {
+    // Error handling fields
+    error?: string;
+    message?: string;
+    detail?: string;
+    
+    hourlyData: Array<{
+      hour: number;
+      batterySocEnd?: number;
+      batteryAction?: number;
+      batteryMode?: string;
+      solarProduction?: number;
+      homeConsumption?: number;
+      gridImport?: number;
+      gridImported?: number;
+      gridExport?: number;
+      grid_export?: number;
+      gridExported?: number;
+      batteryCharged?: number;
+      battery_charged?: number;
+      batteryDischarged?: number;
+      battery_discharged?: number;
+      dataSource?: string;
+      data_source?: string;
+      isActual?: boolean;
+      buyPrice?: number;
+      sellPrice?: number;
+      strategicIntent?: string;
+    }>;
+    tomorrowData?: Array<any> | null;
+    currentHour?: number;
+    dataSources?: Record<string, any>;
+    summary?: {
+      gridOnlyCost?: number;  // Updated name
+      optimizedCost?: number;
+      savings?: number;
+    };
+    totals?: Record<string, number>;
+    strategicIntentSummary?: Record<string, number>;
+    actualHoursCount?: number;
+    predictedHoursCount?: number;
+    totalDailySavings?: number;
+    actual_savings_so_far?: number;
+    actual_hours_count?: number;
+    predicted_remaining_savings?: number;
+    predicted_hours_count?: number;
+    batteryCapacity?: number;
+  }
+
+  const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isInitializing, setIsInitializing] = useState(false);
+  const [initStatus, setInitStatus] = useState<string>("");
+  const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
+
+  // User preferences (resolution, etc.)
+  const { dataResolution, setDataResolution, showSellPrice, setShowSellPrice } = useUserPreferences();
+
+  // Health summary state for alert banner
+  interface HealthSummary {
+    hasCriticalErrors: boolean;
+    hasWarnings: boolean;
+    criticalIssues: Array<{
+      component: string;
+      description: string;
+      detail?: string;
+      status: string;
+    }>;
+    totalCriticalIssues: number;
+    timestamp: string;
+  }
+  
+  const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
+  const [isRecheckingHealth, setIsRecheckingHealth] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
+
+  // Runtime failures state
+  const { failures, dismissFailure, dismissAllFailures } = useRuntimeFailures();
+
+  // Health-check recoveries: components that self-resolved since the last
+  // check, surfaced independent of whether anyone saw the live banner (#215).
+  const { recoveries, acknowledgeRecoveries } = useHealthRecoveries();
+
+  // Historical data status state
+  interface HistoricalDataStatus {
+    isIncomplete: boolean;
+    missingHours: number[];
+    completedHours: number[];
+    totalMissing: number;
+    totalCompleted: number;
+    message: string;
+    timestamp: string;
+    dismissed: boolean;
+  }
+
+  const [historicalDataStatus, setHistoricalDataStatus] = useState<HistoricalDataStatus | null>(null);
+
+  // Handle historical warning dismissal — persisted server-side, keyed to
+  // today's date and the exact missing hours (matches useRuntimeFailures/
+  // useHealthRecoveries: call the API, then optimistically update state).
+  const handleDismissHistoricalWarning = useCallback(async () => {
+    try {
+      await api.post('/api/historical-data-status/dismiss');
+      setHistoricalDataStatus(prev => (prev ? { ...prev, dismissed: true } : prev));
+    } catch (err) {
+      console.error('Failed to dismiss historical data warning:', err);
+    }
+  }, []);
+
+  // Memoize the fetchData function to avoid recreation on each render
+  const fetchData = useCallback(async (isManualRefresh = false) => {
+    // Don't show loading state on background refreshes
+    if (isInitialLoad || isManualRefresh) {
+      onLoadingChange(true);
+    }
+    setError(null);
+
+    try {
+      // Fetch dashboard data, health summary, and historical data status concurrently
+      const [dashboardResponse, healthResponse, historicalResponse, settingsResponse] = await Promise.all([
+        api.get('/api/dashboard', { params: { resolution: dataResolution } }),
+        api.get('/api/dashboard-health-summary'),
+        api.get('/api/historical-data-status'),
+        api.get('/api/settings').catch(() => ({ data: null })),
+      ]);
+
+      const response = dashboardResponse;
+      
+      if (response?.data) {
+        if (response.data.error === 'initializing') {
+          // System just configured or restarting — init still running in background.
+          setIsInitializing(true);
+          setInitStatus(response.data.status || "");
+          setDashboardData(null);
+        } else if (response.data.error === 'incomplete_data') {
+          setIsInitializing(false);
+          // Still set the data to what we have (may be partial or empty)
+          setDashboardData(response.data);
+          // Show a warning but continue loading the page
+          setError(`Warning: ${response.data.message} Some dashboard features might not display correctly.`);
+        } else {
+          // Normal successful response
+          setIsInitializing(false);
+          setDashboardData(response.data);
+          setError(null);
+        }
+      } else {
+        throw new Error('No data received from dashboard endpoint');
+      }
+
+      // Process health summary data
+      if (healthResponse?.data) {
+        setHealthSummary(healthResponse.data);
+      }
+
+      // Process historical data status (dismissed state comes from the backend)
+      if (historicalResponse?.data) {
+        setHistoricalDataStatus(historicalResponse.data);
+      }
+
+      if (settingsResponse?.data) {
+        const dm = settingsResponse.data.demoMode || settingsResponse.data.demo_mode || {};
+        setDemoMode(dm.enabled === true);
+      }
+
+      setLastUpdate(new Date());
+
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+      setError(errorMessage);
+      console.error('Dashboard data fetch failed:', err);
+    } finally {
+      onLoadingChange(false);
+      setIsInitialLoad(false);
+    }
+  }, [isInitialLoad, onLoadingChange, dataResolution]); // Add dependencies
+
+  // Manually re-run health checks (e.g. after fixing a sensor in Home Assistant)
+  // instead of waiting for the next periodic refresh.
+  const handleRecheckHealth = useCallback(async () => {
+    setIsRecheckingHealth(true);
+    try {
+      await api.post('/api/system-health/recheck');
+      await fetchData();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+      setError(`Recheck failed: ${errorMessage}`);
+      console.error('Health recheck failed:', err);
+    } finally {
+      setIsRecheckingHealth(false);
+    }
+  }, [fetchData]);
+
+  useEffect(() => {
+    fetchData();
+    // Poll every 3s while initializing for live progress, 60s normally
+    const interval = setInterval(() => fetchData(), isInitializing ? 3000 : 60000);
+    return () => clearInterval(interval);
+  }, [fetchData, isInitializing]);
+
+  // Check if we have valid dashboard data
+  const hasValidData = dashboardData && dashboardData.hourlyData && dashboardData.hourlyData.length > 0;
+  const hasPartialData = dashboardData && dashboardData.error === 'incomplete_data';
+  const now = new Date();
+  const currentHour = now.getHours() + now.getMinutes() / 60;
+
+  return (
+    <div className="space-y-6">
+      {/* Warning Banner for Incomplete Data */}
+      {hasPartialData && (
+        <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-4 rounded">
+          <div className="flex items-center">
+            <div className="flex-shrink-0">
+              <AlertCircle className="h-5 w-5 text-yellow-400" aria-hidden="true" />
+            </div>
+            <div className="ml-3">
+              <p className="text-sm text-yellow-700">
+                {dashboardData?.message || "Some data is missing. The dashboard may display incomplete information."}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Critical Sensor Alert Banner (also covers a pending self-resolved recovery) */}
+      {healthSummary && (healthSummary.hasCriticalErrors || healthSummary.hasWarnings || recoveries.length > 0) && (
+        <AlertBanner
+          hasCriticalErrors={healthSummary.hasCriticalErrors}
+          hasWarnings={healthSummary.hasWarnings}
+          criticalIssues={healthSummary.criticalIssues}
+          totalCriticalIssues={healthSummary.totalCriticalIssues}
+          recoveries={recoveries}
+          onAcknowledgeRecoveries={acknowledgeRecoveries}
+          onRecheck={handleRecheckHealth}
+          isRechecking={isRecheckingHealth}
+          timestamp={healthSummary.timestamp}
+        />
+      )}
+
+      {/* Historical Data Warning Banner */}
+      {historicalDataStatus && historicalDataStatus.isIncomplete && !historicalDataStatus.dismissed && !isInitializing && (
+        <div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-400 p-4 rounded shadow">
+          <div className="flex items-start">
+            <div className="flex-shrink-0">
+              <AlertCircle className="h-5 w-5 text-yellow-400" aria-hidden="true" />
+            </div>
+            <div className="ml-3 flex-1">
+              <h3 className="text-sm font-medium text-yellow-800 dark:text-yellow-200">
+                Incomplete Historical Data
+              </h3>
+              <div className="mt-2 text-sm text-yellow-700 dark:text-yellow-300">
+                <p>{historicalDataStatus.message}</p>
+                <p className="mt-1">
+                  Missing data for {historicalDataStatus.totalMissing} hour{historicalDataStatus.totalMissing !== 1 ? 's' : ''}: {historicalDataStatus.missingHours.join(', ')}
+                </p>
+                <p className="mt-2 text-xs">
+                  This usually happens after system restart when InfluxDB is not configured.
+                  The dashboard will skip these hours and only show data from the current hour onwards.
+                  Optimization continues to work normally starting from the current hour.
+                </p>
+              </div>
+            </div>
+            <div className="ml-auto pl-3">
+              <button
+                onClick={handleDismissHistoricalWarning}
+                className="inline-flex rounded-md bg-yellow-50 dark:bg-yellow-900/20 p-1.5 text-yellow-500 hover:bg-yellow-100 dark:hover:bg-yellow-900/40 focus:outline-none focus:ring-2 focus:ring-yellow-600 focus:ring-offset-2"
+              >
+                <span className="sr-only">Dismiss</span>
+                <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Runtime Failure Alerts */}
+      <RuntimeFailureAlerts
+        failures={failures}
+        onDismiss={dismissFailure}
+        onDismissAll={dismissAllFailures}
+      />
+
+      {/* System Status Header */}
+      <div className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Dashboard</h1>
+          <div className="flex items-center text-sm text-gray-500 dark:text-gray-400">
+            <Clock className="h-4 w-4 mr-1" />
+            Last updated: {lastUpdate.toLocaleTimeString()}
+          </div>
+        </div>
+
+        {/* Resolution Selector */}
+        <div className="mt-4 flex items-center justify-end">
+          <div className="flex bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
+            <button
+              onClick={() => setDataResolution('hourly')}
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                dataResolution === 'hourly'
+                  ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm'
+                  : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white'
+              }`}
+            >
+              60 min
+            </button>
+            <button
+              onClick={() => setDataResolution('quarter-hourly')}
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                dataResolution === 'quarter-hourly'
+                  ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm'
+                  : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white'
+              }`}
+            >
+              15 min
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Initializing state — startup or backfill + schedule running in background */}
+      {isInitializing && (
+        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 p-6 rounded-lg text-center">
+          <div className="flex flex-col items-center gap-3">
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-blue-400 border-t-transparent" />
+            <h3 className="text-sm font-medium text-blue-800 dark:text-blue-200">Initializing system</h3>
+            {initStatus && (
+              <p className="text-sm font-medium text-blue-600 dark:text-blue-400">{initStatus}</p>
+            )}
+            <p className="text-xs text-blue-500 dark:text-blue-400">This takes up to a minute after startup.</p>
+          </div>
+        </div>
+      )}
+
+      {/* Error Display */}
+      {error && !isInitializing && (
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-4 rounded-lg">
+          <div className="flex items-center">
+            <AlertCircle className="h-5 w-5 text-red-400 mr-3" />
+            <div>
+              <h3 className="text-sm font-medium text-red-800 dark:text-red-200">Error loading dashboard</h3>
+              <p className="text-sm text-red-700 dark:text-red-300 mt-1">{error}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main Content */}
+      {hasValidData ? (
+        <>
+          {/* System Overview Cards - New section at the top */}
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">System Overview</h2>
+              <SystemStatusCard systemMode={demoMode ? 'demo' : undefined} />
+            </div>
+          </div>
+
+          {/* Energy Flow Cards - Restructured section */}
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Today&apos;s Energy Flows - Actuals & Predicted</h2>
+              <EnergyFlowCards />
+            </div>
+          </div>
+
+          {/* Fas 2: Perific One real-time power (home-energy-manager) */}
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Perific One</h2>
+              <PerificPowerCard />
+            </div>
+          </div>
+
+          {/* Fas 3b: peak-power governor (EV lever) status */}
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Effektvakt</h2>
+              <GovernorStatusCard />
+            </div>
+          </div>
+
+          {/* Fas 5c: EV price/SOC/solar scheduler status */}
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">EV-laddning</h2>
+              <EvSchedulerStatusCard />
+            </div>
+          </div>
+
+          {/* Fas 4a: Nibe F750 SG Ready heating boost + Lyxläge varmvatten */}
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Nibe</h2>
+              <NibeStatusCard />
+            </div>
+          </div>
+
+          {/* 2026-09-03: dashboard diagnostics from the 3-day live check-in
+              (senaste dagarnas SOC-spann + inverterns skrivbehörighet) —
+              see backend/diagnostics_api.py's docstring for why these two
+              exist. Grouped together since both are read-only, always-on
+              diagnostics rather than a feature with its own settings. */}
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Diagnostik</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <BatterySocRangeCard />
+                <InverterWriteAccessCard />
+              </div>
+            </div>
+          </div>
+
+          {/* Charts Section */}
+          <div className="space-y-6">
+            {/* Schedule */}
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Schedule</h2>
+              <BatteryModeTimeline
+                currentHour={currentHour}
+              />
+            </div>
+
+            {/* Energy Flow Chart */}
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Energy Flow</h2>
+              <EnergyFlowChart
+                dailyViewData={dashboardData.hourlyData as any}
+                tomorrowData={dashboardData.tomorrowData as any}
+                currentHour={currentHour}
+                resolution={dataResolution}
+                showSellPrice={showSellPrice}
+                onShowSellPriceChange={setShowSellPrice}
+              />
+            </div>
+
+            {/* Battery SOC and Energy Flow */}
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Battery SOC and Energy Flow</h2>
+              <BatteryLevelChart
+                hourlyData={dashboardData.hourlyData as any}
+                tomorrowData={dashboardData.tomorrowData as any}
+                settings={settings}
+                resolution={dataResolution}
+              />
+            </div>
+          </div>
+        </>
+      ) : !isInitializing ? (
+        <div className="text-center py-8">
+          <AlertCircle className="h-12 w-12 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
+          <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Dashboard Data</h3>
+          <p className="text-gray-600 dark:text-gray-400 mb-4">
+            The dashboard needs data to display charts and analytics.
+          </p>
+          <button
+            onClick={() => fetchData(true)}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            Try Again
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
