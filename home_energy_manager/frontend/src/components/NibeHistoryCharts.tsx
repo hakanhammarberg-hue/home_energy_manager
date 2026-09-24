@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Area,
   Bar,
   BarChart,
   CartesianGrid,
@@ -37,6 +36,31 @@ function useDarkMode() {
 function formatHourLabel(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleString('sv-SE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+// Defensive formatters for recharts Tooltip: an early version of this
+// component shaded the DHW comfort band with a single Area bound to a
+// [low, high] array value, and the shared Tooltip formatter (same
+// function for every series in a chart) crashed with "toFixed is not a
+// function" the moment that series was hovered, since it assumed every
+// value was a plain number. The band is now two ordinary Lines instead
+// (simpler, no array-valued data key at all), but these formatters keep
+// the array/typeof guards anyway — cheap insurance against any future
+// series that isn't a plain number, and against null/undefined.
+function formatTemp(v: unknown): string {
+  if (Array.isArray(v)) {
+    const [low, high] = v as [number, number];
+    return `${low.toFixed(1)}–${high.toFixed(1)}°C`;
+  }
+  return typeof v === 'number' ? `${v.toFixed(1)}°C` : '–';
+}
+
+function formatOffset(v: unknown): string {
+  return typeof v === 'number' ? `${v}` : '–';
+}
+
+function formatEnergy(v: unknown): string {
+  return typeof v === 'number' ? `${v.toFixed(2)} kWh` : '–';
 }
 
 function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
@@ -82,7 +106,6 @@ export default function NibeHistoryCharts() {
     indoorActual: '#16a34a',
     indoorTarget: isDarkMode ? '#6b7280' : '#9ca3af',
     dhwActual: '#dc2626',
-    dhwBand: isDarkMode ? 'rgba(220,38,38,0.12)' : 'rgba(220,38,38,0.08)',
     spaceHeating: '#f59e0b',
     hotWater: '#3b82f6',
   };
@@ -90,12 +113,6 @@ export default function NibeHistoryCharts() {
   const chartData = periods.map((p: NibeHistoryPeriod) => ({
     ...p,
     label: formatHourLabel(p.timestamp),
-    // recharts Area needs an explicit [low, high] band value, not two
-    // separate dataKeys, to shade the comfort range between them.
-    dhwBand:
-      p.dhwTargetLowC !== null && p.dhwTargetHighC !== null
-        ? [p.dhwTargetLowC, p.dhwTargetHighC]
-        : null,
   }));
 
   const tooltipStyle = {
@@ -157,7 +174,7 @@ export default function NibeHistoryCharts() {
                 tickFormatter={(v: number) => `${v}°`}
                 width={40}
               />
-              <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => (v === null ? '–' : `${v.toFixed(1)}°C`)} />
+              <Tooltip contentStyle={tooltipStyle} formatter={formatTemp} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               <Line
                 type="monotone"
@@ -191,13 +208,26 @@ export default function NibeHistoryCharts() {
                 tickFormatter={(v: number) => `${v}°`}
                 width={40}
               />
-              <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => (v === null ? '–' : `${v.toFixed(1)}°C`)} />
+              <Tooltip contentStyle={tooltipStyle} formatter={formatTemp} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Area
-                dataKey="dhwBand"
-                name="Komfortband"
-                stroke="none"
-                fill={colors.dhwBand}
+              <Line
+                type="monotone"
+                dataKey="dhwTargetHighC"
+                name="Max (komfort)"
+                stroke={colors.indoorTarget}
+                strokeDasharray="4 3"
+                strokeWidth={1.5}
+                dot={false}
+                connectNulls
+              />
+              <Line
+                type="monotone"
+                dataKey="dhwTargetLowC"
+                name="Min (komfort)"
+                stroke={colors.indoorTarget}
+                strokeDasharray="4 3"
+                strokeWidth={1.5}
+                dot={false}
                 connectNulls
               />
               <Line
@@ -221,7 +251,7 @@ export default function NibeHistoryCharts() {
                 tick={{ fill: colors.text, fontSize: 12 }}
                 width={40}
               />
-              <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => (v === null ? '–' : v)} />
+              <Tooltip contentStyle={tooltipStyle} formatter={formatOffset} />
               <Line
                 type="stepAfter"
                 dataKey="offsetC"
@@ -243,7 +273,7 @@ export default function NibeHistoryCharts() {
                 tickFormatter={(v: number) => `${v} kWh`}
                 width={55}
               />
-              <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => (v === null ? '–' : `${v.toFixed(2)} kWh`)} />
+              <Tooltip contentStyle={tooltipStyle} formatter={formatEnergy} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               <Bar dataKey="spaceHeatingEnergyKwh" name="Uppvärmning" stackId="energy" fill={colors.spaceHeating} />
               <Bar dataKey="hwEnergyKwh" name="Varmvatten" stackId="energy" fill={colors.hotWater} />

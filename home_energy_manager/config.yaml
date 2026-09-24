@@ -1,6 +1,6 @@
 name: "Home Energy Manager"
 description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
-version: "0.1.8"
+version: "0.1.9"
 slug: "home_energy_manager"
 # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
 # there's no registry to publish this fork's image to, so the Supervisor
