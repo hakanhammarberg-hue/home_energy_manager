@@ -1,0 +1,56 @@
+From a232956750341d523db9bef6ca918da3845f532f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 19:53:55 +0000
+Subject: [PATCH] Restore index.html entry point and bump to 0.1.7 (missed in
+ prior commit)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The previous commit deleted the stale frontend/assets/ folder but
+accidentally left index.html's fix and the version bump unstaged —
+the actual root-cause fix (pointing index.html back at /src/main.tsx)
+never made it into that commit, so the push it produced changed
+nothing. This commit contains what should have been there originally.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ home_energy_manager/config.yaml         | 2 +-
+ home_energy_manager/frontend/index.html | 6 ++----
+ 2 files changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 2d7202b..993df3e 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.6"
++version: "0.1.7"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/frontend/index.html b/home_energy_manager/frontend/index.html
+index 3e800b2..2bff68f 100644
+--- a/home_energy_manager/frontend/index.html
++++ b/home_energy_manager/frontend/index.html
+@@ -4,11 +4,9 @@
+     <meta charset="UTF-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+     <title>Battery Manager</title>
+-    <script type="module" crossorigin src="./assets/main-Cn4ecN0M.js"></script>
+-    <link rel="modulepreload" crossorigin href="./assets/vendor-c5ypKtDW.js">
+-    <link rel="stylesheet" crossorigin href="./assets/main-B9fa0AUY.css">
+   </head>
+   <body>
+     <div id="root"></div>
++    <script type="module" src="/src/main.tsx"></script>
+   </body>
+-</html>
+\ No newline at end of file
++</html>
+-- 
+2.43.0
+
