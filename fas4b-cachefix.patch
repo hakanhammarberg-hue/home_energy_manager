@@ -1,0 +1,70 @@
+From 3ca6ca455c248a28be7151f8e404d7131a1fa906 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 19:26:03 +0000
+Subject: [PATCH] Fix Docker build cache reuse hiding frontend changes
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two consecutive version bumps (0.1.4, 0.1.5), each with a genuinely
+fresh git clone and a genuinely fresh `docker buildx build`
+invocation confirmed in Supervisor's own logs, still served
+byte-identical frontend output on Håkan's HA box — BuildKit was
+reusing a cached result for the frontend-builder stage despite
+different source content each time.
+
+Fold BUILD_VERSION directly into the `npm run build` RUN
+instruction's own command line (previously it only appeared in an
+earlier, separate `RUN echo`), so this exact step's BuildKit cache
+key is guaranteed to change on every version bump regardless of any
+upstream layer-cache coincidence.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ home_energy_manager/Dockerfile  | 13 +++++++++++--
+ home_energy_manager/config.yaml |  2 +-
+ 2 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/home_energy_manager/Dockerfile b/home_energy_manager/Dockerfile
+index 085e7cc..4bcd887 100644
+--- a/home_energy_manager/Dockerfile
++++ b/home_energy_manager/Dockerfile
+@@ -7,11 +7,20 @@ ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-python:3.13-alpine3.22
+ FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
+ ARG BUILD_VERSION
+ WORKDIR /tmp/frontend
+-RUN echo "Building frontend for version ${BUILD_VERSION}"
+ COPY frontend/package*.json ./
+ RUN npm ci
+ COPY frontend/ ./
+-RUN npm run build
++# BUILD_VERSION is folded directly into this instruction's own command line
++# (not just an earlier, separate RUN) so BuildKit's cache key for THIS exact
++# step is guaranteed to change on every version bump, regardless of any
++# upstream layer-cache coincidence. Diagnosed 2026-09-24: two consecutive
++# version bumps (0.1.4, 0.1.5), each with a genuinely fresh git clone and a
++# genuinely fresh `docker buildx build` invocation, still served
++# byte-identical frontend output — BuildKit was reusing a cached result for
++# the frontend-builder stage's final layers despite different source
++# content. Embedding the version in the actual build command line closes
++# that gap for good.
++RUN echo "Building frontend for version ${BUILD_VERSION}" && BUILD_VERSION=${BUILD_VERSION} npm run build
+ 
+ FROM $BUILD_FROM
+ 
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 63810c2..2d7202b 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.5"
++version: "0.1.6"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+-- 
+2.43.0
+
