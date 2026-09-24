@@ -7,11 +7,20 @@ ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-python:3.13-alpine3.22
 FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
 ARG BUILD_VERSION
 WORKDIR /tmp/frontend
-RUN echo "Building frontend for version ${BUILD_VERSION}"
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
-RUN npm run build
+# BUILD_VERSION is folded directly into this instruction's own command line
+# (not just an earlier, separate RUN) so BuildKit's cache key for THIS exact
+# step is guaranteed to change on every version bump, regardless of any
+# upstream layer-cache coincidence. Diagnosed 2026-09-24: two consecutive
+# version bumps (0.1.4, 0.1.5), each with a genuinely fresh git clone and a
+# genuinely fresh `docker buildx build` invocation, still served
+# byte-identical frontend output — BuildKit was reusing a cached result for
+# the frontend-builder stage's final layers despite different source
+# content. Embedding the version in the actual build command line closes
+# that gap for good.
+RUN echo "Building frontend for version ${BUILD_VERSION}" && BUILD_VERSION=${BUILD_VERSION} npm run build
 
 FROM $BUILD_FROM
 
