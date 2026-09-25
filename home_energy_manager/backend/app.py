@@ -264,6 +264,13 @@ class BESSController:
         # Fas 5b: same idea as governor_last_decision above, for the EV
         # scheduler's dashboard card (Fas 5c, not built yet).
         self.ev_scheduler_last_decision: ev_scheduler.SchedulerDecision | None = None
+        # Added 2026-09-25: EvSchedulerStatusCard only ever showed the
+        # configured SOC-tak (settings value), never the car's actual
+        # current level, even though _poll_ev_charging already reads it
+        # correctly every tick via EV_SOC_ENTITY to feed decide(). This
+        # just keeps a copy of that same read for the API/dashboard to
+        # show — no new HA read, no change to the scheduling logic itself.
+        self.ev_scheduler_last_ev_soc_percent: float | None = None
         # Not user-facing — the plug reading from the previous poll tick,
         # so _poll_ev_charging can pass ev_scheduler.decide() a real
         # was_plug_connected instead of guessing. See that function's own
@@ -578,6 +585,7 @@ class BESSController:
 
         ev_soc_raw = self._read_raw_entity_state(EV_SOC_ENTITY)
         ev_soc_percent = self._to_float(ev_soc_raw)
+        self.ev_scheduler_last_ev_soc_percent = ev_soc_percent
 
         plug_raw = self._read_raw_entity_state(EV_PLUG_ENTITY)
         plug_connected = None if plug_raw is None else plug_raw == "on"

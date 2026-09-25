@@ -57,6 +57,7 @@ function statusColor(
 export default function EvSchedulerStatusCard() {
   const {
     enabled,
+    evSocPercent,
     socCapPercent,
     overrideRequested,
     status,
@@ -86,6 +87,11 @@ export default function EvSchedulerStatusCard() {
             : undefined
       }
       metrics={[
+        {
+          label: 'SOC (nu)',
+          value: evSocPercent !== null ? evSocPercent.toFixed(0) : '—',
+          unit: '%',
+        },
         {
           label: 'SOC-tak',
           value: socCapPercent !== null ? socCapPercent.toFixed(0) : '—',

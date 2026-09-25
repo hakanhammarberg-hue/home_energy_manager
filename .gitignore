@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Frontend build output & dependencies
+home_energy_manager/frontend/node_modules/
+home_energy_manager/frontend/dist/
+
+# Editor/OS cruft
+.DS_Store

@@ -37,6 +37,7 @@ def _status_payload(bess_controller: Any) -> dict:
 
     return {
         "enabled": settings.get("enabled", False),
+        "evSocPercent": getattr(bess_controller, "ev_scheduler_last_ev_soc_percent", None),
         "socCapPercent": settings.get("soc_cap_percent"),
         "lowPriceThresholdOre": settings.get("low_price_threshold_ore"),
         "cheapPricePercentile": settings.get("cheap_price_percentile"),

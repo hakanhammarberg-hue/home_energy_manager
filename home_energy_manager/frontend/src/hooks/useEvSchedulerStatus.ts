@@ -5,6 +5,7 @@ import api from '../lib/api';
 // (backend/ev_scheduler_api.py) exactly, camelCase included.
 export interface EvSchedulerStatusResponse {
   enabled: boolean;
+  evSocPercent: number | null;
   socCapPercent: number | null;
   lowPriceThresholdOre: number | null;
   cheapPricePercentile: number | null;
@@ -34,6 +35,7 @@ export interface EvSchedulerStatusResponse {
 export function useEvSchedulerStatus() {
   const [data, setData] = useState<EvSchedulerStatusResponse>({
     enabled: false,
+    evSocPercent: null,
     socCapPercent: null,
     lowPriceThresholdOre: null,
     cheapPricePercentile: null,
