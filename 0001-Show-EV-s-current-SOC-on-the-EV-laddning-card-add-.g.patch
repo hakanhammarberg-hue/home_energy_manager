@@ -1,0 +1,147 @@
+From 3d700acc52d39e6bfec4c72cd38b9dbfdf0e5537 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 25 Sep 2026 17:49:56 +0000
+Subject: [PATCH] Show EV's current SOC on the EV-laddning card, add .gitignore
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The card only ever showed the configured SOC-tak (cap), never the
+car's actual current battery level, even though _poll_ev_charging
+already reads sensor.ev3_ev_battery_level correctly every tick to
+feed scheduler.decide(). Store that same read on the controller and
+expose it through /api/ev-scheduler/status as evSocPercent, so the
+dashboard can show it without any new HA read or scheduling change.
+
+Also adds a root .gitignore for node_modules/, frontend/dist/, and
+__pycache__/ — previously untracked with nothing excluding them.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ .gitignore                                         | 14 ++++++++++++++
+ home_energy_manager/backend/app.py                 |  8 ++++++++
+ home_energy_manager/backend/ev_scheduler_api.py    |  1 +
+ home_energy_manager/config.yaml                    |  2 +-
+ .../src/components/EvSchedulerStatusCard.tsx       |  6 ++++++
+ .../frontend/src/hooks/useEvSchedulerStatus.ts     |  2 ++
+ 6 files changed, 32 insertions(+), 1 deletion(-)
+ create mode 100644 .gitignore
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..abfbf0f
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,14 @@
++# Python
++__pycache__/
++*.pyc
++*.pyo
++.pytest_cache/
++.venv/
++venv/
++
++# Frontend build output & dependencies
++home_energy_manager/frontend/node_modules/
++home_energy_manager/frontend/dist/
++
++# Editor/OS cruft
++.DS_Store
+diff --git a/home_energy_manager/backend/app.py b/home_energy_manager/backend/app.py
+index 402b0ea..2335474 100644
+--- a/home_energy_manager/backend/app.py
++++ b/home_energy_manager/backend/app.py
+@@ -264,6 +264,13 @@ class BESSController:
+         # Fas 5b: same idea as governor_last_decision above, for the EV
+         # scheduler's dashboard card (Fas 5c, not built yet).
+         self.ev_scheduler_last_decision: ev_scheduler.SchedulerDecision | None = None
++        # Added 2026-09-25: EvSchedulerStatusCard only ever showed the
++        # configured SOC-tak (settings value), never the car's actual
++        # current level, even though _poll_ev_charging already reads it
++        # correctly every tick via EV_SOC_ENTITY to feed decide(). This
++        # just keeps a copy of that same read for the API/dashboard to
++        # show — no new HA read, no change to the scheduling logic itself.
++        self.ev_scheduler_last_ev_soc_percent: float | None = None
+         # Not user-facing — the plug reading from the previous poll tick,
+         # so _poll_ev_charging can pass ev_scheduler.decide() a real
+         # was_plug_connected instead of guessing. See that function's own
+@@ -578,6 +585,7 @@ class BESSController:
+ 
+         ev_soc_raw = self._read_raw_entity_state(EV_SOC_ENTITY)
+         ev_soc_percent = self._to_float(ev_soc_raw)
++        self.ev_scheduler_last_ev_soc_percent = ev_soc_percent
+ 
+         plug_raw = self._read_raw_entity_state(EV_PLUG_ENTITY)
+         plug_connected = None if plug_raw is None else plug_raw == "on"
+diff --git a/home_energy_manager/backend/ev_scheduler_api.py b/home_energy_manager/backend/ev_scheduler_api.py
+index 31aab38..85b0240 100644
+--- a/home_energy_manager/backend/ev_scheduler_api.py
++++ b/home_energy_manager/backend/ev_scheduler_api.py
+@@ -37,6 +37,7 @@ def _status_payload(bess_controller: Any) -> dict:
+ 
+     return {
+         "enabled": settings.get("enabled", False),
++        "evSocPercent": getattr(bess_controller, "ev_scheduler_last_ev_soc_percent", None),
+         "socCapPercent": settings.get("soc_cap_percent"),
+         "lowPriceThresholdOre": settings.get("low_price_threshold_ore"),
+         "cheapPricePercentile": settings.get("cheap_price_percentile"),
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 1695ace..2555484 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.9"
++version: "0.1.10"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/frontend/src/components/EvSchedulerStatusCard.tsx b/home_energy_manager/frontend/src/components/EvSchedulerStatusCard.tsx
+index 9a0d333..f909ac0 100644
+--- a/home_energy_manager/frontend/src/components/EvSchedulerStatusCard.tsx
++++ b/home_energy_manager/frontend/src/components/EvSchedulerStatusCard.tsx
+@@ -57,6 +57,7 @@ function statusColor(
+ export default function EvSchedulerStatusCard() {
+   const {
+     enabled,
++    evSocPercent,
+     socCapPercent,
+     overrideRequested,
+     status,
+@@ -86,6 +87,11 @@ export default function EvSchedulerStatusCard() {
+             : undefined
+       }
+       metrics={[
++        {
++          label: 'SOC (nu)',
++          value: evSocPercent !== null ? evSocPercent.toFixed(0) : '—',
++          unit: '%',
++        },
+         {
+           label: 'SOC-tak',
+           value: socCapPercent !== null ? socCapPercent.toFixed(0) : '—',
+diff --git a/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts b/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts
+index 3b6f291..592086e 100644
+--- a/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts
++++ b/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts
+@@ -5,6 +5,7 @@ import api from '../lib/api';
+ // (backend/ev_scheduler_api.py) exactly, camelCase included.
+ export interface EvSchedulerStatusResponse {
+   enabled: boolean;
++  evSocPercent: number | null;
+   socCapPercent: number | null;
+   lowPriceThresholdOre: number | null;
+   cheapPricePercentile: number | null;
+@@ -34,6 +35,7 @@ export interface EvSchedulerStatusResponse {
+ export function useEvSchedulerStatus() {
+   const [data, setData] = useState<EvSchedulerStatusResponse>({
+     enabled: false,
++    evSocPercent: null,
+     socCapPercent: null,
+     lowPriceThresholdOre: null,
+     cheapPricePercentile: null,
+-- 
+2.43.0
+
