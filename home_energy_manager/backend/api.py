@@ -442,6 +442,87 @@ async def patch_settings(updates: dict):
                         status_code=422,
                         detail="nibe.min_solar_surplus_kw must be zero or greater",
                     )
+                spike_percentile = snake_data.get("price_spike_percentile")
+                if spike_percentile is not None and (
+                    not isinstance(spike_percentile, (int, float))
+                    or isinstance(spike_percentile, bool)
+                    or not (0 <= spike_percentile <= 1)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.price_spike_percentile must be between 0 and 1",
+                    )
+                spike_delta = snake_data.get("price_spike_min_delta_ore")
+                if spike_delta is not None and (
+                    not isinstance(spike_delta, (int, float))
+                    or isinstance(spike_delta, bool)
+                    or spike_delta < 0
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.price_spike_min_delta_ore must be zero or greater",
+                    )
+                spike_lookahead = snake_data.get("price_spike_lookahead_hours")
+                if spike_lookahead is not None and (
+                    not isinstance(spike_lookahead, (int, float))
+                    or isinstance(spike_lookahead, bool)
+                    or spike_lookahead <= 0
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.price_spike_lookahead_hours must be greater than zero",
+                    )
+                dm_floor = snake_data.get("degree_minutes_floor")
+                if dm_floor is not None and (
+                    not isinstance(dm_floor, (int, float)) or isinstance(dm_floor, bool)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.degree_minutes_floor must be a number",
+                    )
+                # Fas 4e (2026-09-26) — active price-peak reduction,
+                # anti-flap/hysteresis, and the DHW legionella guard. See
+                # core/nibe/decision.py's FIFTH/SIXTH/SEVENTH sections.
+                expensive_percentile = snake_data.get("expensive_price_percentile")
+                if expensive_percentile is not None and (
+                    not isinstance(expensive_percentile, (int, float))
+                    or isinstance(expensive_percentile, bool)
+                    or not (0 <= expensive_percentile <= 1)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.expensive_price_percentile must be between 0 and 1",
+                    )
+                heat_offset_reduction = snake_data.get("heat_offset_reduction_c")
+                if heat_offset_reduction is not None and (
+                    not isinstance(heat_offset_reduction, (int, float))
+                    or isinstance(heat_offset_reduction, bool)
+                    or heat_offset_reduction > 0
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.heat_offset_reduction_c must be zero or negative",
+                    )
+                upgrade_cooldown = snake_data.get("upgrade_cooldown_s")
+                if upgrade_cooldown is not None and (
+                    not isinstance(upgrade_cooldown, (int, float))
+                    or isinstance(upgrade_cooldown, bool)
+                    or upgrade_cooldown < 0
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.upgrade_cooldown_s must be zero or greater",
+                    )
+                max_continuous_economy = snake_data.get("max_continuous_economy_s")
+                if max_continuous_economy is not None and (
+                    not isinstance(max_continuous_economy, (int, float))
+                    or isinstance(max_continuous_economy, bool)
+                    or max_continuous_economy <= 0
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.max_continuous_economy_s must be greater than zero",
+                    )
 
             if store_key == "ev_scheduler":
                 soc_cap = snake_data.get("soc_cap_percent")

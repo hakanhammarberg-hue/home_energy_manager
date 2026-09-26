@@ -42,6 +42,7 @@ from core.nibe import decision as nibe_decision
 from core.nibe.controller import (
     DHW_COMFORT_MODE_ECONOMY,
     DHW_COMFORT_MODE_LUXURY,
+    DHW_COMFORT_MODE_NORMAL,
     NibeController,
 )
 from core.perific.reader import PerificReader
@@ -83,6 +84,17 @@ EV_PLUG_ENTITY = "binary_sensor.ev3_ev_battery_plug"
 # Still open: no watchdog yet, blocking this running with demo_mode off.
 NIBE_HEAT_OFFSET_ENTITY = "number.heat_offset_s1_47011"
 NIBE_DHW_COMFORT_MODE_ENTITY = "select.hot_water_comfort_mode_47041"
+
+# Fas 4d (2026-09-26): degree-minutes floor input — see
+# core/nibe/decision.py's FOURTH LEVER section. Read-only, a raw
+# _read_raw_entity_state() poll like INVERTER_VPP_REMOTE_CONTROL_ENTITY
+# below, not a NibeController method — this isn't a lever this add-on
+# writes to (see controller.py's BLOCKED write-safety tier), just a safety
+# input decide_heating_boost() reads. number.degree_minutes_32_bit_40940
+# also exists in the registry (same device) but stays "unavailable" after
+# enable+reload, same failure mode as the SG Ready AUX sensors — the
+# 16-bit register is the one that actually answers on this F750.
+NIBE_DEGREE_MINUTES_ENTITY = "number.degree_minutes_16_bit_43005"
 
 # Dashboard diagnostics addition (2026-09-03), same stopgap as the constants
 # above: read from a live 3-day check-in (see that day's conversation) that
@@ -286,6 +298,16 @@ class BESSController:
             None
         )
         self.nibe_dhw_last_decision: nibe_decision.DhwLuxuryDecision | None = None
+
+        # Fas 4e (2026-09-26): state tracking for the anti-flap/hysteresis
+        # lever (nibe_decision's SIXTH section) and the DHW legionella guard
+        # (SEVENTH section) — both live only in this controller, never in
+        # settings_store, since they're transient per-process state, not
+        # configuration. All None until the first relevant poll tick; see
+        # _poll_nibe for the reset-on-disable and first-tick-init logic.
+        self.nibe_heat_offset_last_applied_c: int | None = None
+        self.nibe_heat_offset_last_changed_monotonic: float | None = None
+        self.nibe_dhw_last_non_economy_monotonic: float | None = None
 
         # Dashboard diagnostics addition (2026-09-03): two independent,
         # always-on, read-only stats — see _poll_diagnostics for why they're
@@ -730,6 +752,55 @@ class BESSController:
             return today_prices_ore[period], today_prices_ore
         return None, today_prices_ore
 
+    def _read_upcoming_prices_ore(
+        self,
+        today_prices_ore: list[float] | None,
+        lookahead_hours: float,
+    ) -> tuple[list[float] | None, list[float] | None]:
+        """Fas 4c: forward-looking price window for the predictive pre-heat
+        lever — see core/nibe/decision.py's THIRD LEVER section for what
+        consumes this.
+
+        Assembles today's remaining quarter-hours plus tomorrow's (once
+        Nordpool has published them) into one combined öre/kWh series, then
+        slices the next `lookahead_hours` worth of periods starting just
+        after the current one. All the date/time-index reasoning lives
+        here, deliberately, so core.nibe.decision stays pure and
+        time-agnostic like every other function in that module.
+
+        Returns (upcoming_window, all_known) — both None/empty and never an
+        exception when today's prices or the current period aren't
+        available, or when tomorrow's prices aren't published yet
+        (get_tomorrow_prices() already returns [] for that case, not an
+        error — same "no data this cycle" contract as
+        _read_today_prices_ore). A missing forward window is a normal,
+        common daytime condition (Nordpool tomorrow prices only appear in
+        the early afternoon), not a fault — decide_heating_boost() treats
+        it as "spike exception not proven this cycle", nothing more.
+        """
+        if not today_prices_ore:
+            return None, None
+
+        try:
+            tomorrow_entries = self.system.price_manager.get_tomorrow_prices()
+        except Exception as e:
+            logger.debug("Could not read tomorrow's prices for Nibe pre-heat: %s", e)
+            tomorrow_entries = []
+        tomorrow_prices_ore = [entry["buyPrice"] * 100 for entry in tomorrow_entries]
+
+        all_known_prices_ore = today_prices_ore + tomorrow_prices_ore
+
+        period = time_utils.get_current_period_index()
+        if not (0 <= period < len(today_prices_ore)):
+            return None, all_known_prices_ore or None
+
+        lookahead_periods = max(1, round(lookahead_hours * time_utils.PERIODS_PER_HOUR))
+        window_start = period + 1
+        window_end = window_start + lookahead_periods
+        upcoming_prices_ore = all_known_prices_ore[window_start:window_end]
+
+        return upcoming_prices_ore or None, all_known_prices_ore or None
+
     def _poll_peak_governor(self) -> None:
         """Fas 3b: reactively cap household power draw by throttling or
         pausing Zaptec's charging current. See
@@ -840,6 +911,12 @@ class BESSController:
         if not nibe_settings.get("enabled", False):
             self.nibe_heating_last_decision = None
             self.nibe_dhw_last_decision = None
+            # Fas 4e: also clear the anti-flap/legionella-guard state so a
+            # later re-enable starts fresh rather than replaying stale
+            # timing against a pump state this add-on hasn't touched since.
+            self.nibe_heat_offset_last_applied_c = None
+            self.nibe_heat_offset_last_changed_monotonic = None
+            self.nibe_dhw_last_non_economy_monotonic = None
             return
 
         # Watchdog heartbeat (Fas 4b): always attempted, even on cycles
@@ -873,6 +950,42 @@ class BESSController:
             "min_solar_surplus_kw", nibe_decision.DEFAULT_MIN_SOLAR_SURPLUS_KW
         )
 
+        # Fas 4c (2026-09-25): forward-looking price window for the
+        # predictive pre-heat lever — see nibe_decision's THIRD LEVER
+        # section. Gathered unconditionally (cheap, pure reads, same
+        # "always compute, let the pure function decide whether to use it"
+        # shape as every other input above) even though it's a no-op in
+        # decide_heating_boost() unless price_spike_boost_enabled is set.
+        price_spike_lookahead_hours = nibe_settings.get(
+            "price_spike_lookahead_hours",
+            nibe_decision.DEFAULT_PRICE_SPIKE_LOOKAHEAD_HOURS,
+        )
+        upcoming_prices_ore, all_known_prices_ore = self._read_upcoming_prices_ore(
+            today_prices_ore, price_spike_lookahead_hours
+        )
+
+        # Fas 4d (2026-09-26): degree-minutes floor — see nibe_decision's
+        # FOURTH LEVER section. A raw read, not a NibeController method
+        # (this add-on never writes this register — see controller.py's
+        # BLOCKED write-safety tier). Always gathered and passed, same as
+        # every other input above — it's decide_heating_boost()'s own job
+        # to decide it matters, not this method's.
+        degree_minutes_raw = self._read_raw_entity_state(NIBE_DEGREE_MINUTES_ENTITY)
+        try:
+            degree_minutes = None if degree_minutes_raw is None else float(degree_minutes_raw)
+        except ValueError:
+            degree_minutes = None
+
+        # Fas 4e (2026-09-26): anti-flap/hysteresis inputs — see
+        # nibe_decision's SIXTH section. seconds_since_offset_last_changed
+        # is computed from the *previous* tick's stored timestamp, before
+        # this tick's state update below.
+        seconds_since_offset_last_changed = (
+            None
+            if self.nibe_heat_offset_last_changed_monotonic is None
+            else time.monotonic() - self.nibe_heat_offset_last_changed_monotonic
+        )
+
         heating_decision = nibe_decision.decide_heating_boost(
             spot_price_ore_per_kwh=spot_price_ore,
             today_prices_ore_per_kwh=today_prices_ore,
@@ -883,10 +996,59 @@ class BESSController:
             seconds_since_last_nibe_contact=seconds_since_last_nibe_contact,
             cheap_price_percentile=cheap_price_percentile,
             min_solar_surplus_kw=min_solar_surplus_kw,
+            price_spike_boost_enabled=nibe_settings.get(
+                "price_spike_boost_enabled", False
+            ),
+            upcoming_prices_ore_per_kwh=upcoming_prices_ore,
+            all_known_prices_ore_per_kwh=all_known_prices_ore,
+            price_spike_percentile=nibe_settings.get(
+                "price_spike_percentile", nibe_decision.DEFAULT_PRICE_SPIKE_PERCENTILE
+            ),
+            price_spike_min_delta_ore=nibe_settings.get(
+                "price_spike_min_delta_ore",
+                nibe_decision.DEFAULT_PRICE_SPIKE_MIN_DELTA_ORE,
+            ),
+            degree_minutes=degree_minutes,
+            degree_minutes_floor=nibe_settings.get(
+                "degree_minutes_floor", nibe_decision.DEFAULT_DEGREE_MINUTES_FLOOR
+            ),
+            price_reduction_enabled=nibe_settings.get(
+                "price_reduction_enabled", False
+            ),
+            expensive_price_percentile=nibe_settings.get(
+                "expensive_price_percentile",
+                nibe_decision.DEFAULT_EXPENSIVE_PRICE_PERCENTILE,
+            ),
+            heat_offset_reduction_c=nibe_settings.get(
+                "heat_offset_reduction_c",
+                nibe_decision.DEFAULT_HEAT_OFFSET_REDUCTION_C,
+            ),
+            previous_heat_offset_c=self.nibe_heat_offset_last_applied_c,
+            seconds_since_offset_last_changed=seconds_since_offset_last_changed,
+            upgrade_cooldown_s=nibe_settings.get(
+                "upgrade_cooldown_s", nibe_decision.DEFAULT_UPGRADE_COOLDOWN_S
+            ),
         )
         self.nibe_heating_last_decision = heating_decision
         if heating_decision.heat_offset_c is not None:
+            # Update the anti-flap clock BEFORE applying, so it reflects
+            # this cycle's actual change (or lack of one) for next time.
+            if (
+                self.nibe_heat_offset_last_applied_c is None
+                or heating_decision.heat_offset_c != self.nibe_heat_offset_last_applied_c
+            ):
+                self.nibe_heat_offset_last_changed_monotonic = time.monotonic()
+            self.nibe_heat_offset_last_applied_c = heating_decision.heat_offset_c
             self.nibe_controller.set_heat_offset(heating_decision.heat_offset_c)
+
+        # Fas 4e (2026-09-26): legionella-guard input — see nibe_decision's
+        # SEVENTH section. Computed from the *previous* tick's stored
+        # timestamp, before this tick's state update below.
+        seconds_since_last_non_economy = (
+            None
+            if self.nibe_dhw_last_non_economy_monotonic is None
+            else time.monotonic() - self.nibe_dhw_last_non_economy_monotonic
+        )
 
         dhw_decision = nibe_decision.decide_dhw_luxury(
             enabled=nibe_settings.get("dhw_luxury_enabled", False),
@@ -898,12 +1060,37 @@ class BESSController:
             target_kw=target_kw,
             cheap_price_percentile=cheap_price_percentile,
             min_solar_surplus_kw=min_solar_surplus_kw,
+            seconds_since_last_non_economy=seconds_since_last_non_economy,
+            max_continuous_economy_s=nibe_settings.get(
+                "max_continuous_economy_s",
+                nibe_decision.DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
+            ),
         )
         self.nibe_dhw_last_decision = dhw_decision
+        if dhw_decision.comfort_mode is None:
+            # dhw_luxury_enabled is off — this add-on has no assurance about
+            # the pump's actual DHW state, so don't let a stale clock carry
+            # over to whenever the feature is turned back on.
+            self.nibe_dhw_last_non_economy_monotonic = None
+        elif self.nibe_dhw_last_non_economy_monotonic is None:
+            # First tick since dhw_luxury_enabled turned on (or since this
+            # add-on last (re)started) — start the clock now rather than
+            # leaving it permanently None (which would silently disable the
+            # guard forever) or assuming the worst about how long Economy
+            # has already run.
+            self.nibe_dhw_last_non_economy_monotonic = time.monotonic()
+        elif dhw_decision.comfort_mode != "economy":
+            self.nibe_dhw_last_non_economy_monotonic = time.monotonic()
+        # else: comfort_mode == "economy" — leave the timestamp as-is so the
+        # continuous-Economy duration keeps accumulating.
+
         if dhw_decision.comfort_mode == "luxury":
             self.nibe_controller.set_dhw_comfort_mode(DHW_COMFORT_MODE_LUXURY)
         elif dhw_decision.comfort_mode == "economy":
             self.nibe_controller.set_dhw_comfort_mode(DHW_COMFORT_MODE_ECONOMY)
+        elif dhw_decision.comfort_mode == "normal":
+            # Legionella guard (Fas 4e) — see nibe_decision's SEVENTH section.
+            self.nibe_controller.set_dhw_comfort_mode(DHW_COMFORT_MODE_NORMAL)
         # comfort_mode is None only when dhw_luxury_enabled is False —
         # deliberately don't touch the register in that case (see
         # decide_dhw_luxury's own docstring).
@@ -912,7 +1099,10 @@ class BESSController:
             logger.warning("nibe heating: %s", heating_decision.reason)
         else:
             logger.debug("nibe heating: %s", heating_decision.reason)
-        logger.debug("nibe dhw: %s", dhw_decision.reason)
+        if dhw_decision.status == "forced_normal_legionella_guard":
+            logger.info("nibe dhw: %s", dhw_decision.reason)
+        else:
+            logger.debug("nibe dhw: %s", dhw_decision.reason)
 
     def _load_options(self):
         """Load InfluxDB options from /data/options.json.

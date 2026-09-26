@@ -610,11 +610,50 @@ class SettingsStore:
             # varmvatten" switch itself — nested under nibe.enabled (the
             # module's own master switch) but independently toggleable;
             # see core/nibe/decision.py's decide_dhw_luxury docstring.
+            # Fas 4c (2026-09-25) added price_spike_boost_enabled and its
+            # three tuning knobs — same nested-opt-in-flag shape as
+            # dhw_luxury_enabled, off by default; see decision.py's THIRD
+            # LEVER section for what each knob does.
+            # Fas 4d (2026-09-26) added degree_minutes_floor — NOT gated by
+            # its own enabled flag, unlike the two above: it's a ceiling
+            # that can only suppress a boost, never cause one, so it's live
+            # as soon as nibe.enabled itself is on. -400.0 is an explicitly
+            # conservative first guess (Håkan hasn't measured his
+            # installation's real electric-addition threshold yet) — see
+            # decision.py's FOURTH LEVER section.
+            # Fas 4e (2026-09-26) added three more items from that day's
+            # GitHub/HA-Community competitive scan (see
+            # claude/omvarldsbevakning-nibe-github-2026-09-26.md), items 1-3
+            # of its recommendation list: price_reduction_enabled +
+            # expensive_price_percentile + heat_offset_reduction_c (active
+            # price-peak reduction, its own nested opt-in flag, off by
+            # default — see decision.py's FIFTH LEVER section);
+            # upgrade_cooldown_s (anti-flap/hysteresis — NOT gated by its
+            # own enabled flag, same reasoning as degree_minutes_floor: it
+            # can only ever delay an upgrade, never cause one, so it's live
+            # whenever nibe.enabled is on — see decision.py's SIXTH
+            # section); max_continuous_economy_s (DHW legionella guard —
+            # likewise not separately gated, live whenever
+            # dhw_luxury_enabled is on, since it can only ever force MORE
+            # heating activity for safety reasons, mirroring
+            # degree_minutes_floor's "safety floors don't need their own
+            # switch" precedent even though this one pushes the opposite
+            # direction — see decision.py's SEVENTH section).
             "nibe": {
                 "enabled": False,
                 "dhw_luxury_enabled": False,
                 "cheap_price_percentile": 0.5,
                 "min_solar_surplus_kw": 0.0,
+                "price_spike_boost_enabled": False,
+                "price_spike_lookahead_hours": 6.0,
+                "price_spike_percentile": 0.85,
+                "price_spike_min_delta_ore": 30.0,
+                "degree_minutes_floor": -400.0,
+                "price_reduction_enabled": False,
+                "expensive_price_percentile": 0.85,
+                "heat_offset_reduction_c": -2,
+                "upgrade_cooldown_s": 1200.0,
+                "max_continuous_economy_s": 259200.0,
             },
         }
 
@@ -879,15 +918,53 @@ class SettingsStore:
             }
             changed = True
 
-        # --- nibe section (added Fas 4a, 2026-09-20) ---
+        # --- nibe section (added Fas 4a, 2026-09-20; price_spike_* added Fas 4c, 2026-09-25; degree_minutes_floor added Fas 4d, 2026-09-26; price_reduction_*/upgrade_cooldown_s/max_continuous_economy_s added Fas 4e, 2026-09-26) ---
         if "nibe" not in self.data:
             self.data["nibe"] = {
                 "enabled": False,
                 "dhw_luxury_enabled": False,
                 "cheap_price_percentile": 0.5,
                 "min_solar_surplus_kw": 0.0,
+                "price_spike_boost_enabled": False,
+                "price_spike_lookahead_hours": 6.0,
+                "price_spike_percentile": 0.85,
+                "price_spike_min_delta_ore": 30.0,
+                "degree_minutes_floor": -400.0,
+                "price_reduction_enabled": False,
+                "expensive_price_percentile": 0.85,
+                "heat_offset_reduction_c": -2,
+                "upgrade_cooldown_s": 1200.0,
+                "max_continuous_economy_s": 259200.0,
             }
             changed = True
+        elif isinstance(self.data.get("nibe"), dict):
+            # Existing installs (Fas 4a/4b/4c/4d) won't have the newer keys
+            # yet — backfill them so decide_heating_boost()/decide_dhw_luxury()
+            # get real defaults instead of silently reading None via .get()
+            # fallbacks at every call site. All defaults here are
+            # no-behavior-change-on-upgrade: price_spike_boost_enabled and
+            # price_reduction_enabled are both off, and
+            # degree_minutes_floor/upgrade_cooldown_s/max_continuous_economy_s
+            # only ever make the system MORE conservative or MORE cautious
+            # about flapping than it already was — none of them can newly
+            # engage anything an existing install wasn't already doing.
+            nibe_section = self.data["nibe"]
+            nibe_defaults = {
+                "price_spike_boost_enabled": False,
+                "price_spike_lookahead_hours": 6.0,
+                "price_spike_percentile": 0.85,
+                "price_spike_min_delta_ore": 30.0,
+                "degree_minutes_floor": -400.0,
+                "price_reduction_enabled": False,
+                "expensive_price_percentile": 0.85,
+                "heat_offset_reduction_c": -2,
+                "upgrade_cooldown_s": 1200.0,
+                "max_continuous_economy_s": 259200.0,
+            }
+            for key, default_value in nibe_defaults.items():
+                if key not in nibe_section:
+                    nibe_section[key] = default_value
+                    changed = True
 
         # --- ai_analyst: rewrite deprecated Claude 4.0 launch model IDs ---
         # claude-{sonnet,opus}-4-20250514 return 404 ahead of their 2026-06-15
