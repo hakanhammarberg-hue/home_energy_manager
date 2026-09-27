@@ -1,0 +1,1884 @@
+From 63cdc05dc33590af6618be7fee4dc1a72f51aa99 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 26 Sep 2026 22:17:46 +0000
+Subject: [PATCH] Nibe: predictive pre-heat, degree-minutes floor, price-peak
+ reduction, anti-flap, legionella guard
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Combines three phases of work on core/nibe/decision.py's two comfort
+levers (space-heating curve offset + DHW "Lyxläge varmvatten"), all
+still gated behind nibe.enabled (default off) so nothing here changes
+behavior for anyone until explicitly turned on in Settings.
+
+Fas 4c (2026-09-25) — predictive pre-heat (THIRD LEVER)
+    decide_heating_boost() gains an independent exception,
+    "engaged_price_spike_ahead": pre-heats the curve when a genuine
+    upcoming price spike (top price_spike_percentile of known prices,
+    and at least price_spike_min_delta_ore above the current price) is
+    forecast within price_spike_lookahead_hours. Gated by its own
+    nibe.price_spike_boost_enabled flag. Checked after the existing
+    solar-surplus/cheap-price checks so it never overrides either.
+    Inspired in part by github.com/Samot89/
+    Smart-NIBE-Control-a-Home-Assistant-MQTT's own pre-heat idea.
+
+Fas 4d (2026-09-26) — degree-minutes floor (FOURTH LEVER)
+    number.degree_minutes_16_bit_43005 enabled and confirmed live.
+    decide_heating_boost() gains a ceiling check (not a new exception):
+    a degree_minutes reading at/below degree_minutes_floor (default
+    -400.0, a conservative first guess) blocks any of the three boost
+    branches, since a boost is exactly the wrong move while the
+    compressor is already under enough load to risk triggering electric
+    addition. Not gated by its own enabled flag — it can only make the
+    system MORE conservative, so it's live whenever nibe.enabled is on.
+
+Fas 4e (2026-09-26) — three items from that day's GitHub/HA-Community
+competitive scan (claude/omvarldsbevakning-nibe-github-2026-09-26.md),
+picked by Håkan as items 1-3 of that report's recommendation list:
+
+  1. Active price-peak reduction (FIFTH LEVER). decide_heating_boost()
+     gains "reduced_expensive_price": during a genuinely expensive hour
+     (top expensive_price_percentile of today's prices, default 0.85),
+     actively pulls the curve offset negative by heat_offset_reduction_c
+     (default -2, its own independent constant) instead of only ever
+     holding at neutral. Gated by its own nibe.price_reduction_enabled
+     flag, off by default. Checked after the three boost branches (never
+     overrides a proven boost) and deliberately NOT gated by the
+     degree-minutes floor — a negative offset only reduces compressor
+     demand, which that floor has no reason to block.
+
+  2. Upgrade hysteresis / anti-flap (SIXTH section), mirroring
+     tengmo-ab/smart-heat-control's own two-years-in-production pattern:
+     any *increase* in heat_offset_c within upgrade_cooldown_s (default
+     1200s / 20 minutes, matching their reported figure) of the last
+     change is suppressed and held at the previous value
+     ("suppressed_anti_flap"); a decrease always applies instantly.
+     Wraps only the comfort outcome (solar/cheap/spike/reduction/normal)
+     — never the hard safety statuses (no_data, watchdog_reset,
+     no_headroom, blocked_low_degree_minutes), which always take effect
+     immediately regardless of cooldown. New backend/app.py state:
+     nibe_heat_offset_last_applied_c / nibe_heat_offset_last_changed_monotonic.
+
+  3. DHW legionella/disinfection guard (SEVENTH section), inspired by
+     tvofi/heatpump_optimizer's treatment of legionella disinfection as
+     a non-negotiable MPC constraint. decide_dhw_luxury() forces
+     comfort_mode="normal" (never "luxury") once continuous Economy time
+     exceeds max_continuous_economy_s (default 259200s / 3 days, an
+     explicitly unconfirmed defense-in-depth guess, not a measured value
+     for this pump/installation). Deliberately overrides governor
+     headroom too, unlike every other check in this module — judged an
+     acceptable trade given it fires at most once every several days.
+     New backend/app.py state: nibe_dhw_last_non_economy_monotonic, with
+     first-tick initialization so a fresh start doesn't read as either
+     "never economy" or "already over the limit".
+
+Testing: core/nibe/tests/test_decision.py grows from 32 to 61 tests
+(all passing) covering the price-spike and degree-minutes-floor
+behavior (Fas 4c/4d) plus 18 new cases for the three Fas 4e items,
+including their interactions with each other and with the existing
+levers (e.g. anti-flap never suppressing a hard safety status, price
+reduction not blocked by the DM floor, the legionella guard overriding
+no_headroom).
+
+Settings: core/bess/settings_store.py's nibe section gains
+price_reduction_enabled / expensive_price_percentile /
+heat_offset_reduction_c / upgrade_cooldown_s / max_continuous_economy_s,
+all backfilled for existing installs via _migrate_schema() with
+no-behavior-change-on-upgrade defaults. backend/api.py validates each
+new numeric setting.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ home_energy_manager/backend/api.py            |  81 +++
+ home_energy_manager/backend/app.py            | 192 +++++-
+ .../core/bess/settings_store.py               |  79 ++-
+ home_energy_manager/core/nibe/decision.py     | 616 ++++++++++++++++--
+ .../core/nibe/tests/test_decision.py          | 568 ++++++++++++++++
+ 5 files changed, 1497 insertions(+), 39 deletions(-)
+
+diff --git a/home_energy_manager/backend/api.py b/home_energy_manager/backend/api.py
+index 80ed429..a3ef5d0 100644
+--- a/home_energy_manager/backend/api.py
++++ b/home_energy_manager/backend/api.py
+@@ -442,6 +442,87 @@ async def patch_settings(updates: dict):
+                         status_code=422,
+                         detail="nibe.min_solar_surplus_kw must be zero or greater",
+                     )
++                spike_percentile = snake_data.get("price_spike_percentile")
++                if spike_percentile is not None and (
++                    not isinstance(spike_percentile, (int, float))
++                    or isinstance(spike_percentile, bool)
++                    or not (0 <= spike_percentile <= 1)
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.price_spike_percentile must be between 0 and 1",
++                    )
++                spike_delta = snake_data.get("price_spike_min_delta_ore")
++                if spike_delta is not None and (
++                    not isinstance(spike_delta, (int, float))
++                    or isinstance(spike_delta, bool)
++                    or spike_delta < 0
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.price_spike_min_delta_ore must be zero or greater",
++                    )
++                spike_lookahead = snake_data.get("price_spike_lookahead_hours")
++                if spike_lookahead is not None and (
++                    not isinstance(spike_lookahead, (int, float))
++                    or isinstance(spike_lookahead, bool)
++                    or spike_lookahead <= 0
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.price_spike_lookahead_hours must be greater than zero",
++                    )
++                dm_floor = snake_data.get("degree_minutes_floor")
++                if dm_floor is not None and (
++                    not isinstance(dm_floor, (int, float)) or isinstance(dm_floor, bool)
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.degree_minutes_floor must be a number",
++                    )
++                # Fas 4e (2026-09-26) — active price-peak reduction,
++                # anti-flap/hysteresis, and the DHW legionella guard. See
++                # core/nibe/decision.py's FIFTH/SIXTH/SEVENTH sections.
++                expensive_percentile = snake_data.get("expensive_price_percentile")
++                if expensive_percentile is not None and (
++                    not isinstance(expensive_percentile, (int, float))
++                    or isinstance(expensive_percentile, bool)
++                    or not (0 <= expensive_percentile <= 1)
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.expensive_price_percentile must be between 0 and 1",
++                    )
++                heat_offset_reduction = snake_data.get("heat_offset_reduction_c")
++                if heat_offset_reduction is not None and (
++                    not isinstance(heat_offset_reduction, (int, float))
++                    or isinstance(heat_offset_reduction, bool)
++                    or heat_offset_reduction > 0
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.heat_offset_reduction_c must be zero or negative",
++                    )
++                upgrade_cooldown = snake_data.get("upgrade_cooldown_s")
++                if upgrade_cooldown is not None and (
++                    not isinstance(upgrade_cooldown, (int, float))
++                    or isinstance(upgrade_cooldown, bool)
++                    or upgrade_cooldown < 0
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.upgrade_cooldown_s must be zero or greater",
++                    )
++                max_continuous_economy = snake_data.get("max_continuous_economy_s")
++                if max_continuous_economy is not None and (
++                    not isinstance(max_continuous_economy, (int, float))
++                    or isinstance(max_continuous_economy, bool)
++                    or max_continuous_economy <= 0
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.max_continuous_economy_s must be greater than zero",
++                    )
+ 
+             if store_key == "ev_scheduler":
+                 soc_cap = snake_data.get("soc_cap_percent")
+diff --git a/home_energy_manager/backend/app.py b/home_energy_manager/backend/app.py
+index 2335474..2ee8c89 100644
+--- a/home_energy_manager/backend/app.py
++++ b/home_energy_manager/backend/app.py
+@@ -42,6 +42,7 @@ from core.nibe import decision as nibe_decision
+ from core.nibe.controller import (
+     DHW_COMFORT_MODE_ECONOMY,
+     DHW_COMFORT_MODE_LUXURY,
++    DHW_COMFORT_MODE_NORMAL,
+     NibeController,
+ )
+ from core.perific.reader import PerificReader
+@@ -84,6 +85,17 @@ EV_PLUG_ENTITY = "binary_sensor.ev3_ev_battery_plug"
+ NIBE_HEAT_OFFSET_ENTITY = "number.heat_offset_s1_47011"
+ NIBE_DHW_COMFORT_MODE_ENTITY = "select.hot_water_comfort_mode_47041"
+ 
++# Fas 4d (2026-09-26): degree-minutes floor input — see
++# core/nibe/decision.py's FOURTH LEVER section. Read-only, a raw
++# _read_raw_entity_state() poll like INVERTER_VPP_REMOTE_CONTROL_ENTITY
++# below, not a NibeController method — this isn't a lever this add-on
++# writes to (see controller.py's BLOCKED write-safety tier), just a safety
++# input decide_heating_boost() reads. number.degree_minutes_32_bit_40940
++# also exists in the registry (same device) but stays "unavailable" after
++# enable+reload, same failure mode as the SG Ready AUX sensors — the
++# 16-bit register is the one that actually answers on this F750.
++NIBE_DEGREE_MINUTES_ENTITY = "number.degree_minutes_16_bit_43005"
++
+ # Dashboard diagnostics addition (2026-09-03), same stopgap as the constants
+ # above: read from a live 3-day check-in (see that day's conversation) that
+ # the inverter's remote-control permission (select.*_vpp_remote_control)
+@@ -287,6 +299,16 @@ class BESSController:
+         )
+         self.nibe_dhw_last_decision: nibe_decision.DhwLuxuryDecision | None = None
+ 
++        # Fas 4e (2026-09-26): state tracking for the anti-flap/hysteresis
++        # lever (nibe_decision's SIXTH section) and the DHW legionella guard
++        # (SEVENTH section) — both live only in this controller, never in
++        # settings_store, since they're transient per-process state, not
++        # configuration. All None until the first relevant poll tick; see
++        # _poll_nibe for the reset-on-disable and first-tick-init logic.
++        self.nibe_heat_offset_last_applied_c: int | None = None
++        self.nibe_heat_offset_last_changed_monotonic: float | None = None
++        self.nibe_dhw_last_non_economy_monotonic: float | None = None
++
+         # Dashboard diagnostics addition (2026-09-03): two independent,
+         # always-on, read-only stats — see _poll_diagnostics for why they're
+         # grouped into one job, and their own docstrings for what each
+@@ -730,6 +752,55 @@ class BESSController:
+             return today_prices_ore[period], today_prices_ore
+         return None, today_prices_ore
+ 
++    def _read_upcoming_prices_ore(
++        self,
++        today_prices_ore: list[float] | None,
++        lookahead_hours: float,
++    ) -> tuple[list[float] | None, list[float] | None]:
++        """Fas 4c: forward-looking price window for the predictive pre-heat
++        lever — see core/nibe/decision.py's THIRD LEVER section for what
++        consumes this.
++
++        Assembles today's remaining quarter-hours plus tomorrow's (once
++        Nordpool has published them) into one combined öre/kWh series, then
++        slices the next `lookahead_hours` worth of periods starting just
++        after the current one. All the date/time-index reasoning lives
++        here, deliberately, so core.nibe.decision stays pure and
++        time-agnostic like every other function in that module.
++
++        Returns (upcoming_window, all_known) — both None/empty and never an
++        exception when today's prices or the current period aren't
++        available, or when tomorrow's prices aren't published yet
++        (get_tomorrow_prices() already returns [] for that case, not an
++        error — same "no data this cycle" contract as
++        _read_today_prices_ore). A missing forward window is a normal,
++        common daytime condition (Nordpool tomorrow prices only appear in
++        the early afternoon), not a fault — decide_heating_boost() treats
++        it as "spike exception not proven this cycle", nothing more.
++        """
++        if not today_prices_ore:
++            return None, None
++
++        try:
++            tomorrow_entries = self.system.price_manager.get_tomorrow_prices()
++        except Exception as e:
++            logger.debug("Could not read tomorrow's prices for Nibe pre-heat: %s", e)
++            tomorrow_entries = []
++        tomorrow_prices_ore = [entry["buyPrice"] * 100 for entry in tomorrow_entries]
++
++        all_known_prices_ore = today_prices_ore + tomorrow_prices_ore
++
++        period = time_utils.get_current_period_index()
++        if not (0 <= period < len(today_prices_ore)):
++            return None, all_known_prices_ore or None
++
++        lookahead_periods = max(1, round(lookahead_hours * time_utils.PERIODS_PER_HOUR))
++        window_start = period + 1
++        window_end = window_start + lookahead_periods
++        upcoming_prices_ore = all_known_prices_ore[window_start:window_end]
++
++        return upcoming_prices_ore or None, all_known_prices_ore or None
++
+     def _poll_peak_governor(self) -> None:
+         """Fas 3b: reactively cap household power draw by throttling or
+         pausing Zaptec's charging current. See
+@@ -840,6 +911,12 @@ class BESSController:
+         if not nibe_settings.get("enabled", False):
+             self.nibe_heating_last_decision = None
+             self.nibe_dhw_last_decision = None
++            # Fas 4e: also clear the anti-flap/legionella-guard state so a
++            # later re-enable starts fresh rather than replaying stale
++            # timing against a pump state this add-on hasn't touched since.
++            self.nibe_heat_offset_last_applied_c = None
++            self.nibe_heat_offset_last_changed_monotonic = None
++            self.nibe_dhw_last_non_economy_monotonic = None
+             return
+ 
+         # Watchdog heartbeat (Fas 4b): always attempted, even on cycles
+@@ -873,6 +950,42 @@ class BESSController:
+             "min_solar_surplus_kw", nibe_decision.DEFAULT_MIN_SOLAR_SURPLUS_KW
+         )
+ 
++        # Fas 4c (2026-09-25): forward-looking price window for the
++        # predictive pre-heat lever — see nibe_decision's THIRD LEVER
++        # section. Gathered unconditionally (cheap, pure reads, same
++        # "always compute, let the pure function decide whether to use it"
++        # shape as every other input above) even though it's a no-op in
++        # decide_heating_boost() unless price_spike_boost_enabled is set.
++        price_spike_lookahead_hours = nibe_settings.get(
++            "price_spike_lookahead_hours",
++            nibe_decision.DEFAULT_PRICE_SPIKE_LOOKAHEAD_HOURS,
++        )
++        upcoming_prices_ore, all_known_prices_ore = self._read_upcoming_prices_ore(
++            today_prices_ore, price_spike_lookahead_hours
++        )
++
++        # Fas 4d (2026-09-26): degree-minutes floor — see nibe_decision's
++        # FOURTH LEVER section. A raw read, not a NibeController method
++        # (this add-on never writes this register — see controller.py's
++        # BLOCKED write-safety tier). Always gathered and passed, same as
++        # every other input above — it's decide_heating_boost()'s own job
++        # to decide it matters, not this method's.
++        degree_minutes_raw = self._read_raw_entity_state(NIBE_DEGREE_MINUTES_ENTITY)
++        try:
++            degree_minutes = None if degree_minutes_raw is None else float(degree_minutes_raw)
++        except ValueError:
++            degree_minutes = None
++
++        # Fas 4e (2026-09-26): anti-flap/hysteresis inputs — see
++        # nibe_decision's SIXTH section. seconds_since_offset_last_changed
++        # is computed from the *previous* tick's stored timestamp, before
++        # this tick's state update below.
++        seconds_since_offset_last_changed = (
++            None
++            if self.nibe_heat_offset_last_changed_monotonic is None
++            else time.monotonic() - self.nibe_heat_offset_last_changed_monotonic
++        )
++
+         heating_decision = nibe_decision.decide_heating_boost(
+             spot_price_ore_per_kwh=spot_price_ore,
+             today_prices_ore_per_kwh=today_prices_ore,
+@@ -883,11 +996,60 @@ class BESSController:
+             seconds_since_last_nibe_contact=seconds_since_last_nibe_contact,
+             cheap_price_percentile=cheap_price_percentile,
+             min_solar_surplus_kw=min_solar_surplus_kw,
++            price_spike_boost_enabled=nibe_settings.get(
++                "price_spike_boost_enabled", False
++            ),
++            upcoming_prices_ore_per_kwh=upcoming_prices_ore,
++            all_known_prices_ore_per_kwh=all_known_prices_ore,
++            price_spike_percentile=nibe_settings.get(
++                "price_spike_percentile", nibe_decision.DEFAULT_PRICE_SPIKE_PERCENTILE
++            ),
++            price_spike_min_delta_ore=nibe_settings.get(
++                "price_spike_min_delta_ore",
++                nibe_decision.DEFAULT_PRICE_SPIKE_MIN_DELTA_ORE,
++            ),
++            degree_minutes=degree_minutes,
++            degree_minutes_floor=nibe_settings.get(
++                "degree_minutes_floor", nibe_decision.DEFAULT_DEGREE_MINUTES_FLOOR
++            ),
++            price_reduction_enabled=nibe_settings.get(
++                "price_reduction_enabled", False
++            ),
++            expensive_price_percentile=nibe_settings.get(
++                "expensive_price_percentile",
++                nibe_decision.DEFAULT_EXPENSIVE_PRICE_PERCENTILE,
++            ),
++            heat_offset_reduction_c=nibe_settings.get(
++                "heat_offset_reduction_c",
++                nibe_decision.DEFAULT_HEAT_OFFSET_REDUCTION_C,
++            ),
++            previous_heat_offset_c=self.nibe_heat_offset_last_applied_c,
++            seconds_since_offset_last_changed=seconds_since_offset_last_changed,
++            upgrade_cooldown_s=nibe_settings.get(
++                "upgrade_cooldown_s", nibe_decision.DEFAULT_UPGRADE_COOLDOWN_S
++            ),
+         )
+         self.nibe_heating_last_decision = heating_decision
+         if heating_decision.heat_offset_c is not None:
++            # Update the anti-flap clock BEFORE applying, so it reflects
++            # this cycle's actual change (or lack of one) for next time.
++            if (
++                self.nibe_heat_offset_last_applied_c is None
++                or heating_decision.heat_offset_c != self.nibe_heat_offset_last_applied_c
++            ):
++                self.nibe_heat_offset_last_changed_monotonic = time.monotonic()
++            self.nibe_heat_offset_last_applied_c = heating_decision.heat_offset_c
+             self.nibe_controller.set_heat_offset(heating_decision.heat_offset_c)
+ 
++        # Fas 4e (2026-09-26): legionella-guard input — see nibe_decision's
++        # SEVENTH section. Computed from the *previous* tick's stored
++        # timestamp, before this tick's state update below.
++        seconds_since_last_non_economy = (
++            None
++            if self.nibe_dhw_last_non_economy_monotonic is None
++            else time.monotonic() - self.nibe_dhw_last_non_economy_monotonic
++        )
++
+         dhw_decision = nibe_decision.decide_dhw_luxury(
+             enabled=nibe_settings.get("dhw_luxury_enabled", False),
+             spot_price_ore_per_kwh=spot_price_ore,
+@@ -898,12 +1060,37 @@ class BESSController:
+             target_kw=target_kw,
+             cheap_price_percentile=cheap_price_percentile,
+             min_solar_surplus_kw=min_solar_surplus_kw,
++            seconds_since_last_non_economy=seconds_since_last_non_economy,
++            max_continuous_economy_s=nibe_settings.get(
++                "max_continuous_economy_s",
++                nibe_decision.DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
++            ),
+         )
+         self.nibe_dhw_last_decision = dhw_decision
++        if dhw_decision.comfort_mode is None:
++            # dhw_luxury_enabled is off — this add-on has no assurance about
++            # the pump's actual DHW state, so don't let a stale clock carry
++            # over to whenever the feature is turned back on.
++            self.nibe_dhw_last_non_economy_monotonic = None
++        elif self.nibe_dhw_last_non_economy_monotonic is None:
++            # First tick since dhw_luxury_enabled turned on (or since this
++            # add-on last (re)started) — start the clock now rather than
++            # leaving it permanently None (which would silently disable the
++            # guard forever) or assuming the worst about how long Economy
++            # has already run.
++            self.nibe_dhw_last_non_economy_monotonic = time.monotonic()
++        elif dhw_decision.comfort_mode != "economy":
++            self.nibe_dhw_last_non_economy_monotonic = time.monotonic()
++        # else: comfort_mode == "economy" — leave the timestamp as-is so the
++        # continuous-Economy duration keeps accumulating.
++
+         if dhw_decision.comfort_mode == "luxury":
+             self.nibe_controller.set_dhw_comfort_mode(DHW_COMFORT_MODE_LUXURY)
+         elif dhw_decision.comfort_mode == "economy":
+             self.nibe_controller.set_dhw_comfort_mode(DHW_COMFORT_MODE_ECONOMY)
++        elif dhw_decision.comfort_mode == "normal":
++            # Legionella guard (Fas 4e) — see nibe_decision's SEVENTH section.
++            self.nibe_controller.set_dhw_comfort_mode(DHW_COMFORT_MODE_NORMAL)
+         # comfort_mode is None only when dhw_luxury_enabled is False —
+         # deliberately don't touch the register in that case (see
+         # decide_dhw_luxury's own docstring).
+@@ -912,7 +1099,10 @@ class BESSController:
+             logger.warning("nibe heating: %s", heating_decision.reason)
+         else:
+             logger.debug("nibe heating: %s", heating_decision.reason)
+-        logger.debug("nibe dhw: %s", dhw_decision.reason)
++        if dhw_decision.status == "forced_normal_legionella_guard":
++            logger.info("nibe dhw: %s", dhw_decision.reason)
++        else:
++            logger.debug("nibe dhw: %s", dhw_decision.reason)
+ 
+     def _load_options(self):
+         """Load InfluxDB options from /data/options.json.
+diff --git a/home_energy_manager/core/bess/settings_store.py b/home_energy_manager/core/bess/settings_store.py
+index a914086..f69f378 100644
+--- a/home_energy_manager/core/bess/settings_store.py
++++ b/home_energy_manager/core/bess/settings_store.py
+@@ -610,11 +610,50 @@ class SettingsStore:
+             # varmvatten" switch itself — nested under nibe.enabled (the
+             # module's own master switch) but independently toggleable;
+             # see core/nibe/decision.py's decide_dhw_luxury docstring.
++            # Fas 4c (2026-09-25) added price_spike_boost_enabled and its
++            # three tuning knobs — same nested-opt-in-flag shape as
++            # dhw_luxury_enabled, off by default; see decision.py's THIRD
++            # LEVER section for what each knob does.
++            # Fas 4d (2026-09-26) added degree_minutes_floor — NOT gated by
++            # its own enabled flag, unlike the two above: it's a ceiling
++            # that can only suppress a boost, never cause one, so it's live
++            # as soon as nibe.enabled itself is on. -400.0 is an explicitly
++            # conservative first guess (Håkan hasn't measured his
++            # installation's real electric-addition threshold yet) — see
++            # decision.py's FOURTH LEVER section.
++            # Fas 4e (2026-09-26) added three more items from that day's
++            # GitHub/HA-Community competitive scan (see
++            # claude/omvarldsbevakning-nibe-github-2026-09-26.md), items 1-3
++            # of its recommendation list: price_reduction_enabled +
++            # expensive_price_percentile + heat_offset_reduction_c (active
++            # price-peak reduction, its own nested opt-in flag, off by
++            # default — see decision.py's FIFTH LEVER section);
++            # upgrade_cooldown_s (anti-flap/hysteresis — NOT gated by its
++            # own enabled flag, same reasoning as degree_minutes_floor: it
++            # can only ever delay an upgrade, never cause one, so it's live
++            # whenever nibe.enabled is on — see decision.py's SIXTH
++            # section); max_continuous_economy_s (DHW legionella guard —
++            # likewise not separately gated, live whenever
++            # dhw_luxury_enabled is on, since it can only ever force MORE
++            # heating activity for safety reasons, mirroring
++            # degree_minutes_floor's "safety floors don't need their own
++            # switch" precedent even though this one pushes the opposite
++            # direction — see decision.py's SEVENTH section).
+             "nibe": {
+                 "enabled": False,
+                 "dhw_luxury_enabled": False,
+                 "cheap_price_percentile": 0.5,
+                 "min_solar_surplus_kw": 0.0,
++                "price_spike_boost_enabled": False,
++                "price_spike_lookahead_hours": 6.0,
++                "price_spike_percentile": 0.85,
++                "price_spike_min_delta_ore": 30.0,
++                "degree_minutes_floor": -400.0,
++                "price_reduction_enabled": False,
++                "expensive_price_percentile": 0.85,
++                "heat_offset_reduction_c": -2,
++                "upgrade_cooldown_s": 1200.0,
++                "max_continuous_economy_s": 259200.0,
+             },
+         }
+ 
+@@ -879,15 +918,53 @@ class SettingsStore:
+             }
+             changed = True
+ 
+-        # --- nibe section (added Fas 4a, 2026-09-20) ---
++        # --- nibe section (added Fas 4a, 2026-09-20; price_spike_* added Fas 4c, 2026-09-25; degree_minutes_floor added Fas 4d, 2026-09-26; price_reduction_*/upgrade_cooldown_s/max_continuous_economy_s added Fas 4e, 2026-09-26) ---
+         if "nibe" not in self.data:
+             self.data["nibe"] = {
+                 "enabled": False,
+                 "dhw_luxury_enabled": False,
+                 "cheap_price_percentile": 0.5,
+                 "min_solar_surplus_kw": 0.0,
++                "price_spike_boost_enabled": False,
++                "price_spike_lookahead_hours": 6.0,
++                "price_spike_percentile": 0.85,
++                "price_spike_min_delta_ore": 30.0,
++                "degree_minutes_floor": -400.0,
++                "price_reduction_enabled": False,
++                "expensive_price_percentile": 0.85,
++                "heat_offset_reduction_c": -2,
++                "upgrade_cooldown_s": 1200.0,
++                "max_continuous_economy_s": 259200.0,
+             }
+             changed = True
++        elif isinstance(self.data.get("nibe"), dict):
++            # Existing installs (Fas 4a/4b/4c/4d) won't have the newer keys
++            # yet — backfill them so decide_heating_boost()/decide_dhw_luxury()
++            # get real defaults instead of silently reading None via .get()
++            # fallbacks at every call site. All defaults here are
++            # no-behavior-change-on-upgrade: price_spike_boost_enabled and
++            # price_reduction_enabled are both off, and
++            # degree_minutes_floor/upgrade_cooldown_s/max_continuous_economy_s
++            # only ever make the system MORE conservative or MORE cautious
++            # about flapping than it already was — none of them can newly
++            # engage anything an existing install wasn't already doing.
++            nibe_section = self.data["nibe"]
++            nibe_defaults = {
++                "price_spike_boost_enabled": False,
++                "price_spike_lookahead_hours": 6.0,
++                "price_spike_percentile": 0.85,
++                "price_spike_min_delta_ore": 30.0,
++                "degree_minutes_floor": -400.0,
++                "price_reduction_enabled": False,
++                "expensive_price_percentile": 0.85,
++                "heat_offset_reduction_c": -2,
++                "upgrade_cooldown_s": 1200.0,
++                "max_continuous_economy_s": 259200.0,
++            }
++            for key, default_value in nibe_defaults.items():
++                if key not in nibe_section:
++                    nibe_section[key] = default_value
++                    changed = True
+ 
+         # --- ai_analyst: rewrite deprecated Claude 4.0 launch model IDs ---
+         # claude-{sonnet,opus}-4-20250514 return 404 ahead of their 2026-06-15
+diff --git a/home_energy_manager/core/nibe/decision.py b/home_energy_manager/core/nibe/decision.py
+index 3007216..a2a71b7 100644
+--- a/home_energy_manager/core/nibe/decision.py
++++ b/home_energy_manager/core/nibe/decision.py
+@@ -2,9 +2,17 @@
+ levers: space-heating curve-offset boost and DHW ("Lyxläge varmvatten")
+ luxury mode.
+ 
+-STATUS: Fas 4a (2026-09-20, revised 2026-09-22). Mirrors core.zaptec.scheduler's
+-shape exactly: pure functions, no HA, no NibeController calls, testable
+-without a live pump.
++STATUS: Fas 4a (2026-09-20, revised 2026-09-22), Fas 4c predictive pre-heat
++added 2026-09-25 (see THIRD LEVER section below), Fas 4d degree-minutes
++floor added 2026-09-26 (see FOURTH LEVER section below). Fas 4e
++(2026-09-26) added three more items from that day's GitHub/HA-Community
++competitive scan (see claude/omvarldsbevakning-nibe-github-2026-09-26.md),
++picked by Håkan as items 1-3 of that report's recommendation list: active
++price-peak reduction (FIFTH LEVER), upgrade hysteresis/anti-flap (SIXTH
++section), and a legionella/disinfection guard on DHW Economy (SEVENTH
++section) — see each section below. Mirrors core.zaptec.scheduler's shape
++exactly: pure functions, no HA, no NibeController calls, testable without
++a live pump.
+ 
+ MECHANISM CHOICE — REVISED 2026-09-22 (second pivot; read this before the
+ old SG Ready references elsewhere in this package's history)
+@@ -84,6 +92,247 @@ TWO LEVERS, ONE SHARED SIGNAL SHAPE
+     the decision — it just means the boost/luxury exception isn't proven,
+     and the safe default (0 offset / Economy) holds.
+ 
++THIRD LEVER — PREDICTIVE PRE-HEAT (Fas 4c, 2026-09-25)
++    Håkan's own framing (2026-09-25): today's boost is entirely reactive —
++    it only fires once the current price is already cheap or the sun is
++    already out. It says nothing about a forecastable expensive period
++    coming up later (classically the evening peak), even though the whole
++    point of a curve-offset boost is to bank heat in the building's/
++    buffer's own thermal mass ahead of exactly that kind of window. This
++    weekend's ER57-CU 200 addition (see
++    claude/er57-buffer-plumbing-shopping-list.md) makes that banked heat
++    meaningfully bigger (~235L combined vs. the old 35L internal buffer
++    alone), which is what makes pre-heating worth adding now rather than
++    later.
++
++    decide_heating_boost() gained a third, independent exception —
++    "engaged_price_spike_ahead" — checked after the existing solar-surplus
++    and cheap-price checks (so it never overrides either; it only fires
++    when neither of those already justified a boost). It compares the
++    current price against the highest price in a forward-looking window
++    (upcoming_prices_ore_per_kwh, assembled by the caller from today's
++    remaining quarter-hours plus tomorrow's once Nordpool publishes them —
++    see backend/app.py's _poll_nibe) rather than only today's static
++    cheap-price percentile. Two conditions both have to hold, not just
++    one, before this pre-heats:
++        1. the upcoming peak is itself a genuine spike — at or above
++           price_spike_percentile of all currently-known prices (today +
++           tomorrow when available), not merely "pricier than now" (a
++           mild rising trend shouldn't trigger a boost, exactly the same
++           reasoning core.zaptec.scheduler uses percentile-of-known-prices
++           rather than a fixed öre threshold elsewhere in this project);
++        2. that peak is at least price_spike_min_delta_ore above the
++           current price — guards against boosting for a spike that's
++           technically in the top percentile but only marginally pricier
++           than right now, where spending energy to pre-heat wouldn't be
++           worth it.
++    Gated by its own nibe.price_spike_boost_enabled flag
++    (price_spike_boost_enabled param here), independent of
++    dhw_luxury_enabled and of nibe.enabled itself being on — same nested
++    opt-in-flag shape as dhw_luxury_enabled, so wiring this in changes
++    nothing for anyone until it's explicitly turned on. Missing forward
++    price data (upcoming_prices_ore_per_kwh empty/None — e.g. Nordpool
++    tomorrow prices not published yet, ordinarily true until early
++    afternoon) is NOT an error: the branch is simply skipped that cycle,
++    same "burden of proof on the exception" contract as every other check
++    in this module — a lesson taken directly from this same session's
++    core.bess.battery_system_manager incident, where a missing-data case
++    for a different feature (influxdb_7d_avg consumption forecasting) had
++    no graceful fallback and fatally aborted an entire schedule computation
++    instead of just skipping the one enhancement that needed the missing
++    data.
++
++    Reuses heat_offset_boost_c (the same +2 lever, same
++    MAX_SAFE_HEAT_OFFSET_C ceiling in controller.py) rather than a second,
++    larger constant — this is still the same conservative curve-offset
++    register, and a season of real (demo_mode=False) data is what should
++    justify going further, not a guess made before the ER57 buffer is even
++    plumbed in.
++
++    Prior art consulted (2026-09-25): github.com/Samot89/
++    Smart-NIBE-Control-a-Home-Assistant-MQTT, a NIBE Modbus curve-offset
++    blueprint independently built around the same "pre-heat 1-8h before a
++    price rise" idea (their write-up calls it exactly that), among several
++    other weighted factors (indoor-temperature correction, solar braking,
++    a degree-minutes protection threshold, weather-forecast bonus). Their
++    approach computes one continuously-blended offset from many signals
++    at once; this module deliberately keeps the existing discrete-branch
++    shape (solar OR cheap-price OR spike OR normal, each an all-or-nothing
++    +2/0) instead of adopting a weighted-sum model — consistent with this
++    whole package's "small, auditable, testable-without-a-live-pump"
++    design goal, and because Håkan's own ask was specifically to add
++    forward-looking price awareness, not to redesign the lever's shape.
++    Their degree-minutes protection threshold (dm_threshold, guarding
++    against compressor stress/bivalence activation) was flagged here as a
++    genuinely useful idea not yet implemented — see FOURTH LEVER below for
++    where it landed once a live degree-minutes entity was actually found
++    and confirmed (2026-09-26).
++
++FOURTH LEVER — DEGREE-MINUTES FLOOR, A GATE NOT AN EXCEPTION (Fas 4d, 2026-09-26)
++    number.degree_minutes_16_bit_43005 ("Degree Minutes (16 bit)") was
++    found disabled_by="integration" like almost everything else on this
++    device, enabled + the nibe_heatpump config entry reloaded, and
++    confirmed live (reading -40.0 DM at the time). A sibling
++    number.degree_minutes_32_bit_40940 exists in the registry too but
++    stays "unavailable" after the same enable+reload — same failure mode
++    as the SG Ready AUX sensors and the GP1 operational-mode select
++    elsewhere in this device: registered, but this F750 doesn't answer it
++    over Modbus. The 16-bit register is the one this module reads.
++
++    Degree-minutes is the pump's own running heat-deficit accumulator:
++    at/near zero means no unmet demand, and it goes more negative the
++    longer/harder the compressor needs to run to keep up. Nibe's own
++    firmware uses a (installer-configurable, menu 5.1.x) DM threshold to
++    decide when to bring in electric immersion/bivalent heat on top of the
++    compressor — exactly the expensive fallback a cost-saving boost must
++    not accidentally trigger. Unlike the other three levers above, this
++    is NOT a new way to justify a boost — it's a ceiling check that can
++    only ever suppress one: decide_heating_boost() now checks it right
++    after governor headroom and before any of the three exception
++    branches (solar / cheap-price / price-spike), so a deeply negative DM
++    reading blocks the boost regardless of which of those three would
++    otherwise have engaged it.
++
++    Because this can only make the system MORE conservative, never less,
++    it deliberately does NOT get its own nibe.*_enabled opt-in flag the
++    way dhw_luxury_enabled and price_spike_boost_enabled do — it's live
++    as soon as nibe.enabled itself is on, same as the pre-existing
++    governor-headroom check. Gating a safety floor behind a separate
++    "turn the safety on" switch would invert the whole point of it.
++
++    degree_minutes_floor defaults to DEFAULT_DEGREE_MINUTES_FLOOR — an
++    explicitly conservative first guess (Håkan, 2026-09-26: "Vi kan väl
++    börja med ett konservativt värde"), not a measured value. Håkan's own
++    installer menu setting for when electric addition actually kicks in
++    is unknown; -400 DM sits in the same range the Smart-NIBE-Control
++    project uses for the identical purpose (see THIRD LEVER above), with
++    comfortable margin above the live -40 DM baseline this was written
++    against. Revisit once a season of logged DM history (now that the
++    entity is enabled — recorder starts from 2026-09-26) shows what this
++    installation's real electric-addition threshold and normal winter
++    range actually are.
++
++    Missing degree_minutes (None — entity unavailable, HA unreachable,
++    etc.) is NOT treated as a reason to block: same "burden of proof on
++    the exception" convention this whole module already uses for
++    price/solar data, applied here to a gate instead of an exception —
++    absence of evidence that DM is dangerously low is not evidence that
++    it is. This intentionally does NOT extend to decide_dhw_luxury() yet;
++    Håkan's ask was scoped to the heating-boost lever specifically, and
++    DHW's own electric-addition behavior may differ enough to deserve its
++    own look rather than reusing this threshold by assumption.
++
++FIFTH LEVER — ACTIVE PRICE-PEAK REDUCTION (Fas 4e, 2026-09-26)
++    Every existing branch of decide_heating_boost() is reactive-or-better:
++    it either does nothing (0 offset, the pump's own neutral) or spends a
++    little extra energy now to bank comfort/savings for later. None of them
++    ever ask for LESS heat than the pump's own curve would already deliver.
++    Item 1 of the 2026-09-26 competitive scan's recommendation list closes
++    that gap: during a genuinely expensive period, actively pull the curve
++    offset negative (heat_offset_reduction_c, a new, independent constant —
++    not the boost constant's sign flipped, so the two magnitudes can be
++    tuned separately) rather than only ever holding at neutral.
++
++    "Genuinely expensive" uses the same percentile-of-known-prices shape as
++    every other price check in this module — expensive_price_percentile
++    (default DEFAULT_EXPENSIVE_PRICE_PERCENTILE) against
++    today_prices_ore_per_kwh, the same reference list cheap_price_percentile
++    already uses, just the opposite tail of the distribution. Gated by its
++    own nibe.price_reduction_enabled opt-in flag, same nested-flag shape as
++    dhw_luxury_enabled and price_spike_boost_enabled — off by default,
++    changes nothing for anyone until explicitly turned on.
++
++    Checked AFTER the three boost branches (solar / cheap-price / spike) —
++    if any of those already justified a boost, the price is by definition
++    not in today's expensive tail, so this never has a chance to override
++    a boost; it only ever fires when none of the boost exceptions applied.
++
++    Deliberately placed OUTSIDE the degree-minutes floor's gate (FOURTH
++    LEVER above): that floor exists specifically to stop this module from
++    asking the compressor to work harder than it should — a negative
++    offset asks it to work LESS, which can never be what the DM floor is
++    protecting against. A pump already deep in negative degree-minutes is
++    exactly when reducing demand during an expensive hour is most welcome,
++    not a reason to withhold it. The floor therefore continues to gate the
++    three boost branches only; the reduction branch runs regardless of
++    degree_minutes.
++
++SIXTH — UPGRADE HYSTERESIS / ANTI-FLAP (Fas 4e, 2026-09-26, cross-cutting)
++    Item 2 of the same recommendation list, directly inspired by
++    tengmo-ab/smart-heat-control's own production-validated pattern (their
++    write-up reports two years of use): an instant downgrade is always
++    safe, but an instant upgrade right after a downgrade (or vice versa,
++    repeatedly) risks flapping the curve offset back and forth every poll
++    cycle whenever a price/solar/DM reading sits right at a threshold —
++    wasted compressor cycling for no real comfort or savings benefit.
++
++    Applied as a thin wrapper around the *comfort* outcome only — solar /
++    cheap-price / spike / expensive-reduction / normal — never around the
++    hard safety statuses (no_data, watchdog_reset, no_headroom,
++    blocked_low_degree_minutes), which must always take effect immediately
++    regardless of how recently the offset last changed; safety is not
++    subject to a cooldown.
++
++    An "upgrade" is any move to a heat_offset_c value HIGHER than
++    previous_heat_offset_c (the caller's last-applied value, tracked in
++    backend/app.py) — that covers economy/normal both moving up, and also
++    a reduction (negative) moving back up to neutral or a boost. A
++    "downgrade" (equal or lower) always applies at once, same as
++    tengmo-ab's "instant downgrade" half of the pattern. An upgrade within
++    upgrade_cooldown_s (default DEFAULT_UPGRADE_COOLDOWN_S, 20 minutes —
++    matching tengmo-ab's own reported figure) of the last change is
++    suppressed: the decision reports "suppressed_anti_flap" and holds at
++    previous_heat_offset_c instead of the natural target, until the
++    cooldown lapses.
++
++    Both previous_heat_offset_c and seconds_since_offset_last_changed
++    default to None (no suppression possible without proof there's
++    something to suppress against) — same burden-of-proof convention as
++    every other input here: a fresh add-on start, or a caller that hasn't
++    wired the new state tracking yet, must never be treated as "just
++    changed the offset a moment ago."
++
++SEVENTH — LEGIONELLA / DISINFECTION GUARD ON DHW ECONOMY (Fas 4e, 2026-09-26)
++    Item 3 of the same list, inspired by tvofi/heatpump_optimizer's
++    treatment of legionella disinfection as a non-negotiable constraint on
++    its own cost-optimizing MPC engine — a health safeguard that overrides
++    the cost objective, not one more input weighed against it.
++
++    decide_dhw_luxury() already resolves "no exception proven" to Economy,
++    and Håkan's own rule ("Kostnadsbesparingen är alltid prioritet ett")
++    means Economy can legitimately persist for a long stretch whenever
++    prices/solar/headroom just never line up — that's the intended
++    behavior for cost, but continuously-Economy DHW is also the one
++    scenario where stored water could plausibly sit below a disinfection
++    temperature for an extended period. This module has no visibility into
++    Håkan's pump's actual water temperature or its firmware's own
++    legionella handling (most Nibe firmware performs this internally
++    regardless of comfort-mode setting — this guard is UNCONFIRMED
++    defense-in-depth on top of that, not a substitute for it, and not a
++    verified fact about this specific installation).
++
++    Tracks seconds_since_last_non_economy (caller-supplied, mirroring
++    seconds_since_last_nibe_contact's shape) against
++    max_continuous_economy_s (default DEFAULT_MAX_CONTINUOUS_ECONOMY_S, a
++    conservative 3 days — chosen as a defense-in-depth guess, not a
++    measured legionella-risk interval; Nibe's own guidance, if any exists
++    for this model, should supersede it once found). Once exceeded, forces
++    comfort_mode="normal" for at least one cycle — deliberately Normal, not
++    Luxury: this is a safety floor, not a comfort/cost reward, so it should
++    do the minimum needed and no more.
++
++    Applied to BOTH of decide_dhw_luxury()'s Economy-resolving branches
++    (no_headroom and economy_no_condition) — deliberately overriding
++    governor headroom too, unlike every other check in this module. This
++    is the one place a genuinely uncertain safety concern is judged to
++    outweigh the peak-governor's fuse budget; it fires at most once every
++    max_continuous_economy_s (a period measured in days, not minutes), so
++    the added load is rare and brief by construction. Missing
++    seconds_since_last_non_economy (None — fresh start, or a caller that
++    hasn't wired the tracking yet) does not trigger the guard — same
++    burden-of-proof convention as everywhere else: no evidence of a long
++    Economy stretch is not evidence of one.
++
+ WHY BOTH LEVERS CHECK GOVERNOR HEADROOM THEMSELVES
+     Håkan's own framing: "Dock alltid med effektvakt i åtanke, den ska inte
+     överstigas om den spaken är tillkopplad" — the luxury boost must check
+@@ -128,17 +377,83 @@ DEFAULT_WATCHDOG_TIMEOUT_S = 900
+ DEFAULT_HEAT_OFFSET_BOOST_C = 2
+ MAX_SAFE_HEAT_OFFSET_C = 2  # decision-layer ceiling; controller.py clamps again, defense in depth
+ 
++# Fas 4c (2026-09-25) — predictive pre-heat, see module docstring's THIRD
++# LEVER section. 6h sits inside the 1-8h window the Smart-NIBE-Control
++# project reports using for the same idea — long enough to catch a typical
++# evening price ramp starting from an afternoon tick, short enough that
++# "pre-heating" doesn't start most of a day early.
++DEFAULT_PRICE_SPIKE_LOOKAHEAD_HOURS = 6.0
++
++# Top 15% of all currently-known (today + tomorrow) quarter-hour prices
++# counts as a genuine "spike" worth pre-heating for — deliberately stricter
++# than DEFAULT_CHEAP_PRICE_PERCENTILE's 50th-percentile cheap threshold,
++# because this lever is reacting to the *other* tail of the distribution
++# and a false positive costs real energy (heating the buffer for a price
++# rise that turns out to be unremarkable), not just a missed discount.
++DEFAULT_PRICE_SPIKE_PERCENTILE = 0.85
++
++# Even a price in the top percentile might barely differ from right now on
++# a flat-price day — require the upcoming peak to be at least this much
++# pricier than the current price, in öre/kWh, before it's worth spending
++# energy pre-heating for. 30 öre/kWh is a conservative first guess (a
++# clearly noticeable swing, not a rounding-error one); revisit after a
++# season of real data, same as DEFAULT_HEAT_OFFSET_BOOST_C.
++DEFAULT_PRICE_SPIKE_MIN_DELTA_ORE = 30.0
++
++# Fas 4d (2026-09-26) — see module docstring's FOURTH LEVER section for the
++# full reasoning. Explicitly a conservative first guess, not a measured
++# value: Håkan's live reading was -40 DM at the time this was written, and
++# his installer's own electric-addition threshold (menu 5.1.x) is unknown.
++# -400 DM leaves comfortable margin above that baseline while matching the
++# order of magnitude the Smart-NIBE-Control project uses for the same
++# purpose. Revisit once real DM history has accumulated.
++DEFAULT_DEGREE_MINUTES_FLOOR = -400.0
++
++# Fas 4e (2026-09-26) — see module docstring's FIFTH LEVER section. Top 15%
++# of today's known prices, mirroring DEFAULT_PRICE_SPIKE_PERCENTILE's own
++# choice of tail-strictness (the spike check looks forward at upcoming
++# prices; this one looks at whether *right now* is already in that
++# expensive tail) — deliberately the same value so "genuinely expensive"
++# means the same thing whether this module is looking ahead or looking at
++# the present.
++DEFAULT_EXPENSIVE_PRICE_PERCENTILE = 0.85
++
++# A separate, independently-tunable magnitude from DEFAULT_HEAT_OFFSET_BOOST_C
++# — not just its sign flipped — so boost and reduction can be tuned apart
++# once real data justifies either. -2 mirrors the boost lever's own "small,
++# noticeably-different, nowhere near aggressive" sizing philosophy; the
++# register's -10..+10 range technically allows much more.
++DEFAULT_HEAT_OFFSET_REDUCTION_C = -2
++
++# Fas 4e (2026-09-26) — see module docstring's SIXTH section. 20 minutes,
++# matching tengmo-ab/smart-heat-control's own reported figure from two
++# years of production use of the identical "instant downgrade, cooldown on
++# upgrade" pattern.
++DEFAULT_UPGRADE_COOLDOWN_S = 1200
++
++# Fas 4e (2026-09-26) — see module docstring's SEVENTH section. A
++# conservative, explicitly-unconfirmed defense-in-depth guess (3 days), not
++# a measured legionella-risk interval for this specific pump/installation —
++# revisit if Nibe's own documented guidance for this model is ever found.
++DEFAULT_MAX_CONTINUOUS_ECONOMY_S = 259200.0
++
+ 
+ @dataclass(frozen=True)
+ class HeatingBoostDecision:
+     """Whether the space-heating curve-offset lever should be engaged this cycle.
+ 
+     status: "no_data" | "watchdog_reset" | "no_headroom" |
+-        "engaged_cheap_price" | "engaged_solar_surplus" | "normal"
++        "blocked_low_degree_minutes" | "engaged_cheap_price" |
++        "engaged_solar_surplus" | "engaged_price_spike_ahead" |
++        "reduced_expensive_price" | "suppressed_anti_flap" | "normal"
+     heat_offset_c: the value to write to number.heat_offset_s1_47011 —
+-        DEFAULT_HEAT_OFFSET_BOOST_C while boosting, 0 for Normal or
+-        watchdog_reset, None only for no_data (don't touch the register at
+-        all that cycle).
++        DEFAULT_HEAT_OFFSET_BOOST_C while boosting (any of the three
++        "engaged_*" statuses), DEFAULT_HEAT_OFFSET_REDUCTION_C while
++        actively reducing ("reduced_expensive_price"), the held-over
++        previous value while anti-flap is suppressing an upgrade
++        ("suppressed_anti_flap"), 0 for Normal, watchdog_reset, or
++        blocked_low_degree_minutes, None only for no_data (don't touch the
++        register at all that cycle).
+     """
+ 
+     status: str
+@@ -151,11 +466,15 @@ class DhwLuxuryDecision:
+     """Whether DHW should be in Luxury or Economy comfort mode this cycle.
+ 
+     status: "disabled" | "no_headroom" | "luxury_cheap_price" |
+-        "luxury_solar_surplus" | "economy_no_condition"
+-    comfort_mode: "luxury" | "economy" | None (None only when disabled —
+-        the caller must leave the register untouched entirely, the same
+-        "off = don't even read" contract governor/ev_scheduler use for
+-        their own enabled flags).
++        "luxury_solar_surplus" | "economy_no_condition" |
++        "forced_normal_legionella_guard"
++    comfort_mode: "luxury" | "economy" | "normal" | None (None only when
++        disabled — the caller must leave the register untouched entirely,
++        the same "off = don't even read" contract governor/ev_scheduler use
++        for their own enabled flags). "normal" only ever appears for
++        "forced_normal_legionella_guard" — see module docstring's SEVENTH
++        section; this module never chooses Normal for cost/comfort reasons,
++        only as that safety override.
+     """
+ 
+     status: str
+@@ -198,6 +517,19 @@ def decide_heating_boost(
+     headroom_margin_kw: float = DEFAULT_HEADROOM_MARGIN_KW,
+     heat_offset_boost_c: int = DEFAULT_HEAT_OFFSET_BOOST_C,
+     watchdog_timeout_s: float = DEFAULT_WATCHDOG_TIMEOUT_S,
++    price_spike_boost_enabled: bool = False,
++    upcoming_prices_ore_per_kwh: list[float] | None = None,
++    all_known_prices_ore_per_kwh: list[float] | None = None,
++    price_spike_percentile: float = DEFAULT_PRICE_SPIKE_PERCENTILE,
++    price_spike_min_delta_ore: float = DEFAULT_PRICE_SPIKE_MIN_DELTA_ORE,
++    degree_minutes: float | None = None,
++    degree_minutes_floor: float = DEFAULT_DEGREE_MINUTES_FLOOR,
++    price_reduction_enabled: bool = False,
++    expensive_price_percentile: float = DEFAULT_EXPENSIVE_PRICE_PERCENTILE,
++    heat_offset_reduction_c: int = DEFAULT_HEAT_OFFSET_REDUCTION_C,
++    previous_heat_offset_c: int | None = None,
++    seconds_since_offset_last_changed: float | None = None,
++    upgrade_cooldown_s: float = DEFAULT_UPGRADE_COOLDOWN_S,
+ ) -> HeatingBoostDecision:
+     """Pure decision for the space-heating curve-offset comfort-boost lever.
+ 
+@@ -206,6 +538,47 @@ def decide_heating_boost(
+         seconds_since_last_contact()), or None if no read has succeeded yet
+         since this add-on started. Only consulted in the headroom-unknown
+         branch below — see the watchdog note there for why.
++
++    price_spike_boost_enabled: nibe.price_spike_boost_enabled — the
++        predictive pre-heat lever's own opt-in flag (see module docstring's
++        THIRD LEVER section). False (the shipped default) means the three
++        params below are never even consulted — same "off = don't even
++        read" contract dhw_luxury_enabled uses in decide_dhw_luxury.
++    upcoming_prices_ore_per_kwh: forward-looking quarter-hour prices
++        starting just after the current period, already windowed to the
++        lookahead horizon by the caller (backend/app.py) — this function
++        does no date/time math itself, same as every other input here.
++        None or empty (e.g. no forward price data published yet) simply
++        skips this exception for the cycle.
++    all_known_prices_ore_per_kwh: all currently-known prices (typically
++        today + tomorrow) used only as the reference set for
++        price_spike_percentile. Falls back to upcoming_prices_ore_per_kwh
++        itself when not provided — a narrower but still well-defined
++        threshold, not a fatal condition.
++    degree_minutes: live number.degree_minutes_16_bit_43005 reading (see
++        module docstring's FOURTH LEVER section), or None if unavailable.
++        A gate, not an exception — checked right after governor headroom,
++        before any of the three boost exceptions below, so it can only
++        suppress a boost, never cause one. None (missing data) does not
++        block — same burden-of-proof convention as everywhere else here.
++        Does NOT gate the price-reduction branch below (see FIFTH LEVER in
++        the module docstring) — a negative offset only reduces compressor
++        demand, which this floor has no reason to prevent.
++    price_reduction_enabled: nibe.price_reduction_enabled — the active
++        price-peak reduction lever's own opt-in flag (see module
++        docstring's FIFTH LEVER section). False (the shipped default) means
++        expensive_price_percentile/heat_offset_reduction_c are never
++        consulted, same "off = don't even read" contract as
++        price_spike_boost_enabled.
++    previous_heat_offset_c, seconds_since_offset_last_changed,
++        upgrade_cooldown_s: anti-flap/hysteresis inputs (see module
++        docstring's SIXTH section) — suppress an *increase* in offset
++        relative to previous_heat_offset_c when it would happen within
++        upgrade_cooldown_s of the last change. Both state inputs default to
++        None (no suppression without proof there's something to suppress
++        against). Never applied to the hard safety statuses above
++        (no_data, watchdog_reset, no_headroom, blocked_low_degree_minutes)
++        — only to the comfort outcome below.
+     """
+     headroom = _headroom_available(
+         governor_enabled=governor_enabled,
+@@ -255,33 +628,152 @@ def decide_heating_boost(
+             reason="peak governor has no headroom right now — staying at neutral offset",
+         )
+ 
+-    if solar_surplus_kw is not None and solar_surplus_kw > min_solar_surplus_kw:
+-        return HeatingBoostDecision(
+-            status="engaged_solar_surplus",
+-            heat_offset_c=heat_offset_boost_c,
+-            reason=(
+-                f"{solar_surplus_kw:.2f}kW solar surplus would otherwise be "
+-                f"exported — boosting heat curve by +{heat_offset_boost_c}"
+-            ),
+-        )
++    # Fas 4d gate: can only suppress the three BOOST branches just below,
++    # never the price-reduction branch further down (see FIFTH LEVER in the
++    # module docstring) — a negative offset only reduces compressor demand,
++    # which this floor has no reason to block. Tracked as a flag rather
++    # than returning immediately so the reduction branch still gets a
++    # chance to run before this module falls back to reporting the block.
++    dm_blocked = degree_minutes is not None and degree_minutes <= degree_minutes_floor
+ 
+-    if spot_price_ore_per_kwh is not None and today_prices_ore_per_kwh:
+-        threshold = _percentile(today_prices_ore_per_kwh, cheap_price_percentile)
+-        if spot_price_ore_per_kwh <= threshold:
+-            return HeatingBoostDecision(
+-                status="engaged_cheap_price",
++    natural: HeatingBoostDecision | None = None
++
++    if not dm_blocked:
++        if solar_surplus_kw is not None and solar_surplus_kw > min_solar_surplus_kw:
++            natural = HeatingBoostDecision(
++                status="engaged_solar_surplus",
+                 heat_offset_c=heat_offset_boost_c,
+                 reason=(
+-                    f"price {spot_price_ore_per_kwh:.1f} öre <= {threshold:.1f} öre "
+-                    f"(cheapest {cheap_price_percentile:.0%} of today) — boosting heat "
+-                    f"curve by +{heat_offset_boost_c}"
++                    f"{solar_surplus_kw:.2f}kW solar surplus would otherwise be "
++                    f"exported — boosting heat curve by +{heat_offset_boost_c}"
++                ),
++            )
++
++        if natural is None and spot_price_ore_per_kwh is not None and today_prices_ore_per_kwh:
++            threshold = _percentile(today_prices_ore_per_kwh, cheap_price_percentile)
++            if spot_price_ore_per_kwh <= threshold:
++                natural = HeatingBoostDecision(
++                    status="engaged_cheap_price",
++                    heat_offset_c=heat_offset_boost_c,
++                    reason=(
++                        f"price {spot_price_ore_per_kwh:.1f} öre <= {threshold:.1f} öre "
++                        f"(cheapest {cheap_price_percentile:.0%} of today) — boosting heat "
++                        f"curve by +{heat_offset_boost_c}"
++                    ),
++                )
++
++        if (
++            natural is None
++            and price_spike_boost_enabled
++            and spot_price_ore_per_kwh is not None
++            and upcoming_prices_ore_per_kwh
++        ):
++            reference_prices = all_known_prices_ore_per_kwh or upcoming_prices_ore_per_kwh
++            spike_threshold = _percentile(reference_prices, price_spike_percentile)
++            upcoming_peak = max(upcoming_prices_ore_per_kwh)
++            delta_ore = upcoming_peak - spot_price_ore_per_kwh
++            if upcoming_peak >= spike_threshold and delta_ore >= price_spike_min_delta_ore:
++                natural = HeatingBoostDecision(
++                    status="engaged_price_spike_ahead",
++                    heat_offset_c=heat_offset_boost_c,
++                    reason=(
++                        f"upcoming price {upcoming_peak:.1f} öre >= {spike_threshold:.1f} "
++                        f"öre (top {1 - price_spike_percentile:.0%} of known prices) and "
++                        f"{delta_ore:.1f} öre above the current "
++                        f"{spot_price_ore_per_kwh:.1f} öre — pre-heating by "
++                        f"+{heat_offset_boost_c} ahead of it"
++                    ),
++                )
++
++    # Fas 4e, FIFTH LEVER — active price-peak reduction. Runs whether or not
++    # dm_blocked, and only when none of the three boost branches above
++    # already fired (a boost, if proven, always takes priority).
++    if (
++        natural is None
++        and price_reduction_enabled
++        and spot_price_ore_per_kwh is not None
++        and today_prices_ore_per_kwh
++    ):
++        expensive_threshold = _percentile(today_prices_ore_per_kwh, expensive_price_percentile)
++        if spot_price_ore_per_kwh >= expensive_threshold:
++            natural = HeatingBoostDecision(
++                status="reduced_expensive_price",
++                heat_offset_c=heat_offset_reduction_c,
++                reason=(
++                    f"price {spot_price_ore_per_kwh:.1f} öre >= {expensive_threshold:.1f} öre "
++                    f"(most expensive {1 - expensive_price_percentile:.0%} of today) — "
++                    f"reducing heat curve by {heat_offset_reduction_c}"
+                 ),
+             )
+ 
++    if natural is None and dm_blocked:
++        # Hard safety status — bypasses anti-flap entirely (see SIXTH
++        # section in the module docstring): a suppressed downgrade could
++        # otherwise leave a boost in place past the point the DM floor says
++        # it should stop.
++        return HeatingBoostDecision(
++            status="blocked_low_degree_minutes",
++            heat_offset_c=0,
++            reason=(
++                f"degree minutes {degree_minutes:.0f} <= floor "
++                f"{degree_minutes_floor:.0f} — compressor is already under "
++                "enough load that boosting further risks triggering "
++                "electric addition, staying at neutral offset"
++            ),
++        )
++
++    if natural is None:
++        natural = HeatingBoostDecision(
++            status="normal",
++            heat_offset_c=0,
++            reason=(
++                "no cheap-price, solar-surplus, upcoming-spike, or "
++                "expensive-price exception proven — staying at neutral offset"
++            ),
++        )
++
++    return _apply_anti_flap(
++        natural,
++        previous_heat_offset_c=previous_heat_offset_c,
++        seconds_since_offset_last_changed=seconds_since_offset_last_changed,
++        upgrade_cooldown_s=upgrade_cooldown_s,
++    )
++
++
++def _apply_anti_flap(
++    natural: HeatingBoostDecision,
++    *,
++    previous_heat_offset_c: int | None,
++    seconds_since_offset_last_changed: float | None,
++    upgrade_cooldown_s: float,
++) -> HeatingBoostDecision:
++    """Suppress an *increase* in heat_offset_c relative to
++    previous_heat_offset_c when it would happen within upgrade_cooldown_s
++    of the last change — see module docstring's SIXTH section. Downgrades
++    (equal or lower) always apply immediately, mirroring
++    tengmo-ab/smart-heat-control's own "instant downgrade" half of the
++    pattern. Only ever called with a *comfort* outcome (solar / cheap-price
++    / spike / expensive-reduction / normal) — never with a hard safety
++    status, which the caller returns directly without going through here.
++    """
++    if previous_heat_offset_c is None or seconds_since_offset_last_changed is None:
++        # No proof there's a recent change to suppress against — same
++        # burden-of-proof convention as every other input in this module.
++        return natural
++    if natural.heat_offset_c is None or natural.heat_offset_c <= previous_heat_offset_c:
++        return natural
++    if seconds_since_offset_last_changed >= upgrade_cooldown_s:
++        return natural
+     return HeatingBoostDecision(
+-        status="normal",
+-        heat_offset_c=0,
+-        reason="no cheap-price or solar-surplus exception proven — staying at neutral offset",
++        status="suppressed_anti_flap",
++        heat_offset_c=previous_heat_offset_c,
++        reason=(
++            f"upgrade from {previous_heat_offset_c} to {natural.heat_offset_c} "
++            f"({natural.status}) suppressed — only "
++            f"{seconds_since_offset_last_changed:.0f}s since the offset last "
++            f"changed (< {upgrade_cooldown_s:.0f}s cooldown); holding at "
++            f"{previous_heat_offset_c}"
++        ),
+     )
+ 
+ 
+@@ -297,12 +789,23 @@ def decide_dhw_luxury(
+     cheap_price_percentile: float = DEFAULT_CHEAP_PRICE_PERCENTILE,
+     min_solar_surplus_kw: float = DEFAULT_MIN_SOLAR_SURPLUS_KW,
+     headroom_margin_kw: float = DEFAULT_HEADROOM_MARGIN_KW,
++    seconds_since_last_non_economy: float | None = None,
++    max_continuous_economy_s: float = DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
+ ) -> DhwLuxuryDecision:
+     """Pure decision for the "Lyxläge varmvatten" dashboard toggle.
+ 
+     `enabled` is the dashboard switch itself (nibe.dhw_luxury_enabled in
+     settings_store) — when off, this is a deliberate no-op: comfort_mode
+     is None and the caller must not touch the register at all.
++
++    seconds_since_last_non_economy, max_continuous_economy_s: legionella/
++        disinfection guard (see module docstring's SEVENTH section) —
++        forces comfort_mode="normal" instead of "economy" once continuous
++        Economy time exceeds max_continuous_economy_s, overriding governor
++        headroom too. seconds_since_last_non_economy defaults to None (no
++        override without proof of a long Economy stretch) — the caller
++        (backend/app.py) is responsible for tracking the actual elapsed
++        time; this function does no date/time math itself.
+     """
+     if not enabled:
+         return DhwLuxuryDecision(
+@@ -325,8 +828,10 @@ def decide_dhw_luxury(
+             if headroom is False
+             else "peak governor is on but household power reading is unavailable"
+         )
+-        return DhwLuxuryDecision(
+-            status="no_headroom", comfort_mode="economy", reason=reason
++        return _apply_legionella_guard(
++            DhwLuxuryDecision(status="no_headroom", comfort_mode="economy", reason=reason),
++            seconds_since_last_non_economy=seconds_since_last_non_economy,
++            max_continuous_economy_s=max_continuous_economy_s,
+         )
+ 
+     if solar_surplus_kw is not None and solar_surplus_kw > min_solar_surplus_kw:
+@@ -351,10 +856,47 @@ def decide_dhw_luxury(
+                 ),
+             )
+ 
++    return _apply_legionella_guard(
++        DhwLuxuryDecision(
++            status="economy_no_condition",
++            comfort_mode="economy",
++            reason="no cheap-price or solar-surplus exception proven — Economy hot water",
++        ),
++        seconds_since_last_non_economy=seconds_since_last_non_economy,
++        max_continuous_economy_s=max_continuous_economy_s,
++    )
++
++
++def _apply_legionella_guard(
++    natural: DhwLuxuryDecision,
++    *,
++    seconds_since_last_non_economy: float | None,
++    max_continuous_economy_s: float,
++) -> DhwLuxuryDecision:
++    """Force comfort_mode="normal" instead of "economy" once continuous
++    Economy time exceeds max_continuous_economy_s — see module docstring's
++    SEVENTH section. Only ever called with an Economy-resolving decision
++    (no_headroom or economy_no_condition); a Luxury outcome is passed
++    through untouched by never being routed here in the first place.
++    """
++    if natural.comfort_mode != "economy":
++        return natural
++    if seconds_since_last_non_economy is None:
++        # No proof Economy has been continuous for a while — same
++        # burden-of-proof convention as everywhere else in this module.
++        return natural
++    if seconds_since_last_non_economy < max_continuous_economy_s:
++        return natural
+     return DhwLuxuryDecision(
+-        status="economy_no_condition",
+-        comfort_mode="economy",
+-        reason="no cheap-price or solar-surplus exception proven — Economy hot water",
++        status="forced_normal_legionella_guard",
++        comfort_mode="normal",
++        reason=(
++            f"{seconds_since_last_non_economy:.0f}s continuously in Economy "
++            f"(>= {max_continuous_economy_s:.0f}s guard) — forcing Normal for "
++            "at least one cycle as a defense-in-depth legionella/"
++            "disinfection safeguard, overriding both the cost-driven "
++            f"Economy default ({natural.status}) and governor headroom"
++        ),
+     )
+ 
+ 
+diff --git a/home_energy_manager/core/nibe/tests/test_decision.py b/home_energy_manager/core/nibe/tests/test_decision.py
+index ffc596b..b8b4da6 100644
+--- a/home_energy_manager/core/nibe/tests/test_decision.py
++++ b/home_energy_manager/core/nibe/tests/test_decision.py
+@@ -4,7 +4,14 @@ same way app.py's own `from core.governor import peak_governor` expects).
+ """
+ 
+ from core.nibe.decision import (
++    DEFAULT_DEGREE_MINUTES_FLOOR,
++    DEFAULT_EXPENSIVE_PRICE_PERCENTILE,
+     DEFAULT_HEAT_OFFSET_BOOST_C,
++    DEFAULT_HEAT_OFFSET_REDUCTION_C,
++    DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
++    DEFAULT_PRICE_SPIKE_MIN_DELTA_ORE,
++    DEFAULT_PRICE_SPIKE_PERCENTILE,
++    DEFAULT_UPGRADE_COOLDOWN_S,
+     DEFAULT_WATCHDOG_TIMEOUT_S,
+     decide_dhw_luxury,
+     decide_heating_boost,
+@@ -12,6 +19,14 @@ from core.nibe.decision import (
+ 
+ CHEAP_TODAY = [10.0, 20.0, 30.0, 40.0]  # median/threshold at p=0.5 -> 20.0
+ 
++# A flat-ish "known prices" reference series where the 85th percentile
++# (DEFAULT_PRICE_SPIKE_PERCENTILE) lands at 90.0 — used by the price-spike
++# tests below. 20 values so nearest-rank percentile math lands cleanly.
++KNOWN_PRICES_WITH_SPIKE = [20.0 + i * 5.0 for i in range(20)]  # 20.0..115.0
++SPIKE_THRESHOLD = sorted(KNOWN_PRICES_WITH_SPIKE)[
++    round(DEFAULT_PRICE_SPIKE_PERCENTILE * (len(KNOWN_PRICES_WITH_SPIKE) - 1))
++]
++
+ 
+ # ---------------------------------------------------------------------------
+ # decide_heating_boost
+@@ -129,6 +144,473 @@ def test_heating_boost_offset_never_exceeds_configured_max():
+     assert d.heat_offset_c == 2
+ 
+ 
++# ---------------------------------------------------------------------------
++# decide_heating_boost — Fas 4c predictive pre-heat (price_spike_boost_enabled)
++# ---------------------------------------------------------------------------
++
++
++def test_price_spike_ignored_when_feature_disabled():
++    """price_spike_boost_enabled defaults to False — a huge upcoming spike
++    must not engage anything until the flag is explicitly turned on,
++    same nested-opt-in-flag contract as dhw_luxury_enabled."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=35.0,  # above CHEAP_TODAY's own cheap threshold (30.0)
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        upcoming_prices_ore_per_kwh=[SPIKE_THRESHOLD + 50.0],
++        all_known_prices_ore_per_kwh=KNOWN_PRICES_WITH_SPIKE,
++        # price_spike_boost_enabled left at its False default
++    )
++    assert d.status == "normal"
++    assert d.heat_offset_c == 0
++
++
++def test_price_spike_engages_when_enabled_and_spike_is_real():
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=35.0,  # above CHEAP_TODAY's own cheap threshold (30.0)
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_spike_boost_enabled=True,
++        upcoming_prices_ore_per_kwh=[30.0, 40.0, SPIKE_THRESHOLD + 20.0, 35.0],
++        all_known_prices_ore_per_kwh=KNOWN_PRICES_WITH_SPIKE,
++    )
++    assert d.status == "engaged_price_spike_ahead"
++    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
++
++
++def test_price_spike_does_not_override_an_already_engaged_cheap_price():
++    """Solar/cheap-price are checked first — a spike later today must never
++    change the reported reason for a boost that's already justified."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,  # cheap by CHEAP_TODAY's own threshold
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_spike_boost_enabled=True,
++        upcoming_prices_ore_per_kwh=[SPIKE_THRESHOLD + 50.0],
++        all_known_prices_ore_per_kwh=KNOWN_PRICES_WITH_SPIKE,
++    )
++    assert d.status == "engaged_cheap_price"
++
++
++def test_price_spike_requires_top_percentile_not_just_pricier_than_now():
++    """A mildly higher upcoming price that never reaches the spike
++    percentile must not engage — this lever is for genuine spikes, not any
++    upward trend."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=35.0,  # above CHEAP_TODAY's own cheap threshold (30.0)
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_spike_boost_enabled=True,
++        upcoming_prices_ore_per_kwh=[40.0, 45.0],  # pricier, but nowhere near top 15%
++        all_known_prices_ore_per_kwh=KNOWN_PRICES_WITH_SPIKE,
++    )
++    assert d.status == "normal"
++    assert d.heat_offset_c == 0
++
++
++def test_price_spike_requires_minimum_delta_over_current_price():
++    """Even a genuine top-percentile spike shouldn't trigger a boost if
++    it's barely above the current price — DEFAULT_PRICE_SPIKE_MIN_DELTA_ORE
++    guards against spending energy pre-heating for a negligible swing."""
++    near_current = SPIKE_THRESHOLD + 1.0
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=near_current - (DEFAULT_PRICE_SPIKE_MIN_DELTA_ORE / 2),
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_spike_boost_enabled=True,
++        upcoming_prices_ore_per_kwh=[near_current],
++        all_known_prices_ore_per_kwh=KNOWN_PRICES_WITH_SPIKE,
++    )
++    assert d.status == "normal"
++    assert d.heat_offset_c == 0
++
++
++def test_price_spike_skipped_gracefully_when_no_forward_price_data():
++    """Missing upcoming_prices_ore_per_kwh (e.g. Nordpool tomorrow prices
++    not published yet) must not be an error — the exact lesson from this
++    session's influxdb_7d_avg incident: a missing optional input degrades
++    to 'not proven this cycle', never a fatal failure."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=35.0,  # above CHEAP_TODAY's own cheap threshold (30.0)
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_spike_boost_enabled=True,
++        upcoming_prices_ore_per_kwh=None,
++        all_known_prices_ore_per_kwh=KNOWN_PRICES_WITH_SPIKE,
++    )
++    assert d.status == "normal"
++    assert d.heat_offset_c == 0
++
++
++def test_price_spike_falls_back_to_upcoming_window_as_its_own_reference():
++    """all_known_prices_ore_per_kwh is optional — when omitted, the
++    upcoming window itself becomes the percentile reference set rather than
++    failing or skipping the check entirely."""
++    # spot sits at today's own most-expensive quarter, so the existing
++    # cheap-price check can't itself explain a boost — isolates the
++    # fallback behavior of the price-spike check specifically.
++    today_with_spot_at_the_top = [100.0, 150.0, 200.0, 250.0]
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=250.0,
++        today_prices_ore_per_kwh=today_with_spot_at_the_top,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_spike_boost_enabled=True,
++        upcoming_prices_ore_per_kwh=[210.0, 210.0, 500.0],
++        all_known_prices_ore_per_kwh=None,
++    )
++    assert d.status == "engaged_price_spike_ahead"
++    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
++
++
++# ---------------------------------------------------------------------------
++# decide_heating_boost — Fas 4d degree-minutes floor
++# ---------------------------------------------------------------------------
++
++
++def test_degree_minutes_floor_blocks_an_otherwise_engaged_cheap_price_boost():
++    """The floor is a gate, not an exception — it must be able to suppress
++    a boost that every other check would otherwise have approved."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,  # cheap by CHEAP_TODAY's own threshold
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR - 1,  # past the floor
++    )
++    assert d.status == "blocked_low_degree_minutes"
++    assert d.heat_offset_c == 0
++
++
++def test_degree_minutes_floor_blocks_solar_surplus_boost_too():
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=100.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=5.0,  # would otherwise engage
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR - 50,
++    )
++    assert d.status == "blocked_low_degree_minutes"
++    assert d.heat_offset_c == 0
++
++
++def test_degree_minutes_at_exactly_the_floor_is_blocked():
++    """<= floor blocks, matching the watchdog's own >= convention for 'at
++    the boundary counts as triggered, not as still-safe'."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR,
++    )
++    assert d.status == "blocked_low_degree_minutes"
++
++
++def test_degree_minutes_above_the_floor_does_not_block():
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR + 1,  # just shy of the floor
++    )
++    assert d.status == "engaged_cheap_price"
++    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
++
++
++def test_degree_minutes_missing_does_not_block():
++    """None (entity unavailable, HA unreachable, etc.) is not evidence the
++    compressor is under load — same burden-of-proof convention as every
++    other input in this module, applied to a gate instead of an exception."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        degree_minutes=None,
++    )
++    assert d.status == "engaged_cheap_price"
++    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
++
++
++def test_degree_minutes_floor_checked_before_solar_and_price_but_after_headroom():
++    """Priority order: no_headroom still wins over the DM floor when the
++    governor itself has zero headroom — the floor only matters once
++    headroom is settled."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=True,
++        current_kw=12.0,
++        target_kw=12.0,  # zero headroom
++        degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR - 100,  # also past the floor
++    )
++    assert d.status == "no_headroom"
++    assert d.heat_offset_c == 0
++
++
++# ---------------------------------------------------------------------------
++# decide_heating_boost — Fas 4e active price-peak reduction (price_reduction_enabled)
++# ---------------------------------------------------------------------------
++
++# CHEAP_TODAY's own 85th-percentile (nearest-rank) threshold — the top value
++# itself, since len(CHEAP_TODAY) == 4.
++EXPENSIVE_THRESHOLD = sorted(CHEAP_TODAY)[
++    round(DEFAULT_EXPENSIVE_PRICE_PERCENTILE * (len(CHEAP_TODAY) - 1))
++]
++
++
++def test_price_reduction_ignored_when_feature_disabled():
++    """price_reduction_enabled defaults to False — an expensive price alone
++    must not reduce the offset until the flag is explicitly turned on."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=EXPENSIVE_THRESHOLD,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        # price_reduction_enabled left at its False default
++    )
++    assert d.status == "normal"
++    assert d.heat_offset_c == 0
++
++
++def test_price_reduction_engages_on_expensive_price_when_enabled():
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=EXPENSIVE_THRESHOLD,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_reduction_enabled=True,
++    )
++    assert d.status == "reduced_expensive_price"
++    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_REDUCTION_C
++
++
++def test_price_reduction_skipped_when_price_not_in_expensive_tier():
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=35.0,  # above cheap threshold, below EXPENSIVE_THRESHOLD (40.0)
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_reduction_enabled=True,
++    )
++    assert d.status == "normal"
++    assert d.heat_offset_c == 0
++
++
++def test_price_reduction_never_overrides_an_already_engaged_boost():
++    """A boost branch always wins if it fires — by construction the same
++    price can't be both cheap and expensive, but solar surplus and an
++    expensive price CAN coexist, and solar must still take priority."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=EXPENSIVE_THRESHOLD,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=5.0,  # would otherwise engage
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_reduction_enabled=True,
++    )
++    assert d.status == "engaged_solar_surplus"
++    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
++
++
++def test_price_reduction_is_not_blocked_by_the_degree_minutes_floor():
++    """The DM floor only protects against asking for MORE heat — a negative
++    offset reduces compressor demand, so it must fire even when degree_minutes
++    is already past the floor (see module docstring's FIFTH LEVER section)."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=EXPENSIVE_THRESHOLD,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_reduction_enabled=True,
++        degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR - 100,  # deep past the floor
++    )
++    assert d.status == "reduced_expensive_price"
++    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_REDUCTION_C
++
++
++def test_degree_minutes_floor_still_blocks_when_reduction_does_not_apply():
++    """When price_reduction_enabled is on but the price ISN'T expensive, the
++    DM floor must still block a boost exactly as it did before this lever
++    existed — Fas 4d's own behavior must be unaffected."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,  # cheap by CHEAP_TODAY's own threshold
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_reduction_enabled=True,
++        degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR - 1,
++    )
++    assert d.status == "blocked_low_degree_minutes"
++    assert d.heat_offset_c == 0
++
++
++def test_price_reduction_missing_price_data_does_not_block():
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=None,
++        today_prices_ore_per_kwh=None,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        price_reduction_enabled=True,
++    )
++    assert d.status == "normal"
++    assert d.heat_offset_c == 0
++
++
++# ---------------------------------------------------------------------------
++# decide_heating_boost — Fas 4e anti-flap / upgrade hysteresis
++# ---------------------------------------------------------------------------
++
++
++def test_anti_flap_suppresses_an_upgrade_within_the_cooldown():
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,  # would otherwise engage cheap-price boost
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        previous_heat_offset_c=0,
++        seconds_since_offset_last_changed=DEFAULT_UPGRADE_COOLDOWN_S - 1,
++    )
++    assert d.status == "suppressed_anti_flap"
++    assert d.heat_offset_c == 0  # held at the previous value
++
++
++def test_anti_flap_allows_the_upgrade_once_cooldown_has_elapsed():
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        previous_heat_offset_c=0,
++        seconds_since_offset_last_changed=DEFAULT_UPGRADE_COOLDOWN_S,
++    )
++    assert d.status == "engaged_cheap_price"
++    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
++
++
++def test_anti_flap_never_suppresses_a_downgrade():
++    """A downgrade (here: falling back to neutral from a previous boost)
++    must apply instantly, mirroring tengmo-ab's own 'instant downgrade'
++    half of the pattern — no cooldown on the way down."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=100.0,  # no boost condition holds anymore
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        previous_heat_offset_c=DEFAULT_HEAT_OFFSET_BOOST_C,
++        seconds_since_offset_last_changed=1.0,  # just changed a moment ago
++    )
++    assert d.status == "normal"
++    assert d.heat_offset_c == 0
++
++
++def test_anti_flap_does_not_apply_without_previous_state():
++    """A fresh add-on start (no previous offset/timestamp tracked yet) must
++    never be treated as 'just changed a moment ago' — same burden-of-proof
++    convention as every other input in this module."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        previous_heat_offset_c=None,
++        seconds_since_offset_last_changed=None,
++    )
++    assert d.status == "engaged_cheap_price"
++    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
++
++
++def test_anti_flap_never_suppresses_the_degree_minutes_floor():
++    """The DM floor is a hard safety status, never wrapped in anti-flap
++    (see module docstring's SIXTH section) — even though moving from a
++    previous -2 reduction up to 0 looks like an 'upgrade', the floor must
++    take effect immediately, not be held off by a cooldown."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR - 1,
++        previous_heat_offset_c=DEFAULT_HEAT_OFFSET_REDUCTION_C,  # -2
++        seconds_since_offset_last_changed=1.0,  # well within cooldown
++    )
++    assert d.status == "blocked_low_degree_minutes"
++    assert d.heat_offset_c == 0
++
++
++def test_anti_flap_never_suppresses_no_headroom():
++    """Same as above but for the no_headroom hard status — the governor's
++    fuse budget must never be held off by an anti-flap cooldown either."""
++    d = decide_heating_boost(
++        spot_price_ore_per_kwh=10.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=True,
++        current_kw=12.0,
++        target_kw=12.0,  # zero headroom
++        previous_heat_offset_c=DEFAULT_HEAT_OFFSET_REDUCTION_C,  # -2
++        seconds_since_offset_last_changed=1.0,
++    )
++    assert d.status == "no_headroom"
++    assert d.heat_offset_c == 0
++
++
+ # ---------------------------------------------------------------------------
+ # decide_heating_boost — Fas 4b watchdog (seconds_since_last_nibe_contact)
+ # ---------------------------------------------------------------------------
+@@ -317,3 +799,89 @@ def test_dhw_luxury_allowed_when_governor_has_headroom():
+     )
+     assert d.status == "luxury_cheap_price"
+     assert d.comfort_mode == "luxury"
++
++
++# ---------------------------------------------------------------------------
++# decide_dhw_luxury — Fas 4e legionella/disinfection guard
++# ---------------------------------------------------------------------------
++
++
++def test_legionella_guard_forces_normal_after_max_continuous_economy():
++    d = decide_dhw_luxury(
++        enabled=True,
++        spot_price_ore_per_kwh=100.0,  # no luxury condition holds
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=0.0,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        seconds_since_last_non_economy=DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
++    )
++    assert d.status == "forced_normal_legionella_guard"
++    assert d.comfort_mode == "normal"
++
++
++def test_legionella_guard_not_yet_triggered_under_the_limit():
++    d = decide_dhw_luxury(
++        enabled=True,
++        spot_price_ore_per_kwh=100.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=0.0,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        seconds_since_last_non_economy=DEFAULT_MAX_CONTINUOUS_ECONOMY_S - 1,
++    )
++    assert d.status == "economy_no_condition"
++    assert d.comfort_mode == "economy"
++
++
++def test_legionella_guard_missing_duration_does_not_trigger():
++    """No tracked duration yet (fresh start, or a caller that hasn't wired
++    the state tracking) must not be treated as a long Economy stretch —
++    same burden-of-proof convention as everywhere else in this module."""
++    d = decide_dhw_luxury(
++        enabled=True,
++        spot_price_ore_per_kwh=100.0,
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=0.0,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        seconds_since_last_non_economy=None,
++    )
++    assert d.status == "economy_no_condition"
++    assert d.comfort_mode == "economy"
++
++
++def test_legionella_guard_overrides_no_headroom_too():
++    """Unlike every other check in this module, the legionella guard
++    deliberately overrides the peak governor's own headroom check — see
++    module docstring's SEVENTH section for why."""
++    d = decide_dhw_luxury(
++        enabled=True,
++        spot_price_ore_per_kwh=10.0,  # would be luxury if headroom allowed it
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=True,
++        current_kw=12.0,
++        target_kw=12.0,  # zero headroom
++        seconds_since_last_non_economy=DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
++    )
++    assert d.status == "forced_normal_legionella_guard"
++    assert d.comfort_mode == "normal"
++
++
++def test_legionella_guard_does_not_affect_a_luxury_outcome():
++    d = decide_dhw_luxury(
++        enabled=True,
++        spot_price_ore_per_kwh=10.0,  # cheap — luxury applies
++        today_prices_ore_per_kwh=CHEAP_TODAY,
++        solar_surplus_kw=None,
++        governor_enabled=False,
++        current_kw=None,
++        target_kw=None,
++        seconds_since_last_non_economy=DEFAULT_MAX_CONTINUOUS_ECONOMY_S * 10,
++    )
++    assert d.status == "luxury_cheap_price"
++    assert d.comfort_mode == "luxury"
+-- 
+2.43.0
+
