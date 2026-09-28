@@ -1,0 +1,1030 @@
+From 33b2c4ab6ad2aae272fa97f839abbcb47c577435 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 28 Sep 2026 20:19:09 +0000
+Subject: [PATCH] Nibe drift: real-time operating-data page (prio, compressor
+ power/frequency/current, pump speeds, degree minutes, temps)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Håkan asked for "driftdata, vad som sker för sekunden" — the existing
+Dashboard NibeStatusCard (30s-cached last-decision summary) and
+NibeHistoryCharts (hourly trends) don't show what the compressor is
+doing right now. New GET /api/nibe/live reads the F750's real-time
+entities straight from HA (prio, compressor power/mean-power/current/
+frequency/state, charge- and supply-pump speed, electric addition,
+degree minutes) alongside the existing settings/last-decision status,
+read-only — same "zero I/O except history+live" convention as
+core/nibe/history.py. New /nibe page combines the live card with the
+existing history charts; both stay on the Dashboard too, unchanged.
+
+Along the way: NibeStatusCard/useNibeStatus had their own stale local
+copies of the heating/DHW status label maps, missing 5 status values
+Fas 4c/4d/4e added (engaged_price_spike_ahead, reduced_expensive_price,
+blocked_low_degree_minutes, suppressed_anti_flap,
+forced_normal_legionella_guard) — pulled into a shared
+lib/nibeStatusLabels.ts both now use, fixing the staleness bug.
+
+Also fixes the frontend's hand-written lucide-react ambient module
+declaration (src/types/lucide-react.d.ts), which was missing
+Thermometer/Droplet/Gauge and silently masked the real package's
+types for every icon.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ home_energy_manager/backend/nibe_api.py       |  35 +++-
+ home_energy_manager/config.yaml               |   2 +-
+ home_energy_manager/core/nibe/live.py         | 171 ++++++++++++++++++
+ .../core/nibe/tests/test_live.py              | 127 +++++++++++++
+ home_energy_manager/frontend/src/App.tsx      |  14 +-
+ .../frontend/src/components/NibeLiveCard.tsx  | 156 ++++++++++++++++
+ .../src/components/NibeStatusCard.tsx         |  47 +----
+ .../frontend/src/hooks/useNibeLive.ts         | 102 +++++++++++
+ .../frontend/src/hooks/useNibeStatus.ts       |  24 +--
+ .../frontend/src/lib/nibeStatusLabels.ts      | 101 +++++++++++
+ .../frontend/src/pages/NibeDriftPage.tsx      |  30 +++
+ .../frontend/src/types/lucide-react.d.ts      |   3 +
+ 12 files changed, 750 insertions(+), 62 deletions(-)
+ create mode 100644 home_energy_manager/core/nibe/live.py
+ create mode 100644 home_energy_manager/core/nibe/tests/test_live.py
+ create mode 100644 home_energy_manager/frontend/src/components/NibeLiveCard.tsx
+ create mode 100644 home_energy_manager/frontend/src/hooks/useNibeLive.ts
+ create mode 100644 home_energy_manager/frontend/src/lib/nibeStatusLabels.ts
+ create mode 100644 home_energy_manager/frontend/src/pages/NibeDriftPage.tsx
+
+diff --git a/home_energy_manager/backend/nibe_api.py b/home_energy_manager/backend/nibe_api.py
+index 32699cc..5c4d0b5 100644
+--- a/home_energy_manager/backend/nibe_api.py
++++ b/home_energy_manager/backend/nibe_api.py
+@@ -11,11 +11,12 @@ and acted on. Recomputing a fresh decision here instead would mean the
+ dashboard could show a hypothetical outcome that was never actually applied
+ (see governor_api.py's docstring — same argument).
+ 
+-GET /api/nibe/history (Fas 5, 2026-09-24) is the deliberate exception: a
+-history/charting endpoint has no way to avoid reaching into Home
+-Assistant's own recorder, so it does — see core/nibe/history.py's
+-docstring for the full reasoning and why that I/O lives in its own core
+-module rather than here.
++GET /api/nibe/history (Fas 5, 2026-09-24) and GET /api/nibe/live
++(2026-09-28) are the deliberate exceptions: a history/charting endpoint
++and a real-time snapshot endpoint both have no way to avoid reaching into
++Home Assistant directly, so they do — see core/nibe/history.py's and
++core/nibe/live.py's own docstrings for the full reasoning and why that I/O
++lives in its own core module rather than here.
+ 
+ POST /api/nibe/dhw-luxury is the one write this router does, and mirrors
+ POST /api/ev-scheduler/override in spirit: a narrow, dashboard-reachable
+@@ -44,6 +45,7 @@ from core.nibe.history import (
+     build_hourly_series,
+     fetch_history_series,
+ )
++from core.nibe.live import fetch_live_snapshot
+ 
+ router = APIRouter()
+ 
+@@ -156,6 +158,29 @@ async def get_nibe_history(hours: int = 48) -> dict:
+     return {"periods": periods}
+ 
+ 
++@router.get("/api/nibe/live")
++async def get_nibe_live() -> dict:
++    """Real-time snapshot for the "Nibe drift" page (2026-09-28): the same
++    settings/last-decision payload GET /api/nibe/status returns, plus a
++    fresh, uncached `live` read of the pump's current compressor power/
++    frequency/current, Prio, degree minutes, pump speeds, electric-addition
++    power and applied curve offset/temperatures straight from Home
++    Assistant — see core/nibe/live.py's docstring for why this is, like
++    GET /api/nibe/history, a deliberate exception to this router's usual
++    zero-I/O rule.
++
++    `live` is `{}` whenever Home Assistant can't be reached at all (a
++    partial read still returns whatever succeeded) — same empty-on-failure
++    convention as GET /api/nibe/history's `periods`.
++    """
++    from app import bess_controller
++
++    payload = _status_payload(bess_controller)
++    controller = bess_controller.nibe_controller
++    payload["live"] = fetch_live_snapshot(controller.base_url, controller.headers)
++    return payload
++
++
+ @router.post("/api/nibe/dhw-luxury")
+ async def set_dhw_luxury_enabled(body: dict) -> dict:
+     """Flip the Lyxläge varmvatten dashboard switch.
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 2555484..e3d24cb 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.10"
++version: "0.1.11"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/core/nibe/live.py b/home_energy_manager/core/nibe/live.py
+new file mode 100644
+index 0000000..eedfaa0
+--- /dev/null
++++ b/home_energy_manager/core/nibe/live.py
+@@ -0,0 +1,171 @@
++"""core.nibe.live — a single real-time snapshot of the Nibe F750's current
++operating state, for the dashboard's "Nibe drift" page (2026-09-28, built
++at Håkan's request: "jag efterlyser driftdata, vad som sker för sekunden").
++
++This sits alongside core.nibe.history (multi-hour charts) and
++core.nibe.controller (the two write-gated control levers) but answers a
++different question: not "what happened over the last N hours" and not
++"read/write the two levers this app controls", but "what is the pump
++actually doing right now" — compressor power/frequency/current, Prio
++(Off/Hot Water/Heat/Pool), degree minutes, charge/supply pump speed, and
++electric-addition power, alongside the same indoor/DHW temperatures and
++applied curve offset the history charts already show. Read-only, zero
++writes, same "None means no data right now" convention as controller.py
++and history.py.
++
++Entities confirmed live against Håkan's Home Assistant 2026-09-28 (most
++needed `enabled: true` + a config-entry reload first — see the project
++status doc's "Nibe drift" entry for the exact sequence; several of the
++~650 disabled-by-default F750 registers, same story as history.py's own
++compr_energy_* counters).
++
++WHY INDIVIDUAL /api/states/<id> CALLS, NOT ONE /api/states DUMP
++    Home Assistant's REST API has no "give me just these N entities"
++    filter on the bulk /api/states endpoint (unlike /api/history/period,
++    which does take filter_entity_id — see history.py). Pulling the whole
++    state machine just to read a dozen values would mean transferring and
++    parsing every entity this HA instance has, dwarfing what an 8-12s
++    dashboard poll should cost. One GET per entity, reusing a single
++    requests.Session for connection keep-alive, stays proportional to
++    what's actually needed and is cheap on a LAN round-trip to Home
++    Assistant either way.
++"""
++
++from __future__ import annotations
++
++import logging
++
++import requests
++
++from core.nibe.history import CLIMATE_ENTITY, DHW_ENTITY, HEAT_OFFSET_ENTITY
++
++logger = logging.getLogger(__name__)
++
++PRIO_ENTITY = "sensor.prio_43086"
++COMPR_POWER_ENTITY = "sensor.compr_in_power_43141"
++COMPR_POWER_MEAN_ENTITY = "sensor.compr_in_power_mean_43375"
++COMPR_CURRENT_ENTITY = "sensor.compr_in_current_43147"
++COMPR_FREQUENCY_ACTUAL_ENTITY = "sensor.compressor_frequency_actual_43136"
++COMPR_STATE_ENTITY = "sensor.compressor_state_ep14_43427"
++CHARGE_PUMP_SPEED_ENTITY = "sensor.chargepump_speed_43181"
++SUPPLY_PUMP_SPEED_ENTITY = "sensor.supply_pump_speed_ep14_43437"
++EL_ADD_POWER_ENTITY = "sensor.int_el_add_power_43084"
++DEGREE_MINUTES_ENTITY = "number.degree_minutes_16_bit_43005"
++
++# Plain state (no attribute) reads. Climate/DHW are handled separately
++# below since the values this page wants live in their *attributes*, not
++# the bare `state` string (same split history.py makes).
++_PLAIN_STATE_ENTITIES = [
++    PRIO_ENTITY,
++    COMPR_POWER_ENTITY,
++    COMPR_POWER_MEAN_ENTITY,
++    COMPR_CURRENT_ENTITY,
++    COMPR_FREQUENCY_ACTUAL_ENTITY,
++    COMPR_STATE_ENTITY,
++    CHARGE_PUMP_SPEED_ENTITY,
++    SUPPLY_PUMP_SPEED_ENTITY,
++    EL_ADD_POWER_ENTITY,
++    DEGREE_MINUTES_ENTITY,
++    HEAT_OFFSET_ENTITY,
++]
++
++# Numeric among the above — everything except Prio and Compressor State,
++# which are short text/enum values ("OFF"/"Hot Water"/..., "STOPPED"/...).
++_NUMERIC_ENTITIES = {
++    COMPR_POWER_ENTITY,
++    COMPR_POWER_MEAN_ENTITY,
++    COMPR_CURRENT_ENTITY,
++    COMPR_FREQUENCY_ACTUAL_ENTITY,
++    CHARGE_PUMP_SPEED_ENTITY,
++    SUPPLY_PUMP_SPEED_ENTITY,
++    EL_ADD_POWER_ENTITY,
++    DEGREE_MINUTES_ENTITY,
++    HEAT_OFFSET_ENTITY,
++}
++
++
++def _safe_float(raw: object) -> float | None:
++    try:
++        return float(raw)  # type: ignore[arg-type]
++    except (TypeError, ValueError):
++        return None
++
++
++def _get_state(
++    session: requests.Session, base_url: str, headers: dict, entity_id: str
++) -> dict | None:
++    """One entity's raw HA state dict, or None on any failure/unavailable
++    state. Mirrors NibeController._get_raw_state's request shape, but
++    returns the full dict (state + attributes) since some callers need
++    attributes, not just the bare state string."""
++    url = f"{base_url}/api/states/{entity_id}"
++    try:
++        response = session.get(url, headers=headers, timeout=10)
++        response.raise_for_status()
++    except requests.RequestException as e:
++        logger.warning("Could not reach Home Assistant for %s: %s", entity_id, e)
++        return None
++
++    try:
++        data = response.json()
++    except ValueError:
++        return None
++
++    if data.get("state") in ("unavailable", "unknown", None):
++        return None
++    return data
++
++
++def fetch_live_snapshot(base_url: str, headers: dict) -> dict:
++    """Fetch every entity this page needs and return a flat, camelCase-keyed
++    dict ready for the API response. A field is None whenever its entity is
++    unavailable/unreachable — never a fabricated zero — so the frontend can
++    show "—" rather than a misleading 0.0. Returns {} only if EVERY read
++    fails (e.g. Home Assistant itself is unreachable); a partial read still
++    returns whatever did succeed, since these entities are independent
++    registers and one being down shouldn't hide the rest.
++    """
++    session = requests.Session()
++    try:
++        plain: dict[str, dict | None] = {
++            entity_id: _get_state(session, base_url, headers, entity_id)
++            for entity_id in _PLAIN_STATE_ENTITIES
++        }
++        climate = _get_state(session, base_url, headers, CLIMATE_ENTITY)
++        dhw = _get_state(session, base_url, headers, DHW_ENTITY)
++    finally:
++        session.close()
++
++    if not any(plain.values()) and climate is None and dhw is None:
++        return {}
++
++    def state_of(entity_id: str) -> str | float | None:
++        data = plain.get(entity_id)
++        if data is None:
++            return None
++        raw = data.get("state")
++        return _safe_float(raw) if entity_id in _NUMERIC_ENTITIES else raw
++
++    def attr_of(data: dict | None, attribute: str) -> float | None:
++        if data is None:
++            return None
++        return _safe_float((data.get("attributes") or {}).get(attribute))
++
++    return {
++        "prio": state_of(PRIO_ENTITY),
++        "compressorPowerKw": state_of(COMPR_POWER_ENTITY),
++        "compressorPowerMeanKw": state_of(COMPR_POWER_MEAN_ENTITY),
++        "compressorCurrentA": state_of(COMPR_CURRENT_ENTITY),
++        "compressorFrequencyHz": state_of(COMPR_FREQUENCY_ACTUAL_ENTITY),
++        "compressorState": state_of(COMPR_STATE_ENTITY),
++        "chargePumpSpeedPct": state_of(CHARGE_PUMP_SPEED_ENTITY),
++        "supplyPumpSpeedPct": state_of(SUPPLY_PUMP_SPEED_ENTITY),
++        "electricAdditionKw": state_of(EL_ADD_POWER_ENTITY),
++        "degreeMinutes": state_of(DEGREE_MINUTES_ENTITY),
++        "heatOffsetC": state_of(HEAT_OFFSET_ENTITY),
++        "indoorActualC": attr_of(climate, "current_temperature"),
++        "indoorTargetC": attr_of(climate, "temperature"),
++        "dhwActualC": attr_of(dhw, "current_temperature"),
++        "dhwTargetHighC": attr_of(dhw, "target_temp_high"),
++        "dhwTargetLowC": attr_of(dhw, "target_temp_low"),
++    }
+diff --git a/home_energy_manager/core/nibe/tests/test_live.py b/home_energy_manager/core/nibe/tests/test_live.py
+new file mode 100644
+index 0000000..910bf12
+--- /dev/null
++++ b/home_energy_manager/core/nibe/tests/test_live.py
+@@ -0,0 +1,127 @@
++"""Unit tests for core.nibe.live.fetch_live_snapshot.
++
++fetch_live_snapshot uses a requests.Session internally (see its own
++docstring for why: one GET per entity, reusing a connection, rather than
++pulling the whole /api/states state machine) — these tests mock
++requests.Session so they never touch a network.
++"""
++
++from unittest.mock import Mock, patch
++
++from core.nibe.history import CLIMATE_ENTITY, DHW_ENTITY, HEAT_OFFSET_ENTITY
++from core.nibe.live import (
++    CHARGE_PUMP_SPEED_ENTITY,
++    COMPR_POWER_ENTITY,
++    COMPR_STATE_ENTITY,
++    DEGREE_MINUTES_ENTITY,
++    PRIO_ENTITY,
++    fetch_live_snapshot,
++)
++
++BASE_URL = "http://homeassistant.local:8123"
++HEADERS = {"Authorization": "Bearer test-token"}
++
++
++def _state(entity_id: str, state: str, attributes: dict | None = None) -> dict:
++    return {"entity_id": entity_id, "state": state, "attributes": attributes or {}}
++
++
++def _mock_session(states_by_entity: dict[str, dict | None]):
++    """A Mock standing in for requests.Session(): .get(url, ...) inspects
++    the URL to find which entity was requested and returns a Mock response
++    whose .json() gives back that entity's canned state dict (or a 404-like
++    unavailable state if the entity was omitted, mirroring how a genuinely
++    disabled/unavailable entity would look after .raise_for_status())."""
++
++    def fake_get(url, headers=None, timeout=None):
++        entity_id = url.rsplit("/", 1)[-1]
++        response = Mock()
++        response.raise_for_status = Mock()
++        response.json = Mock(
++            return_value=states_by_entity.get(
++                entity_id, {"entity_id": entity_id, "state": "unavailable"}
++            )
++        )
++        return response
++
++    session = Mock()
++    session.get = Mock(side_effect=fake_get)
++    session.close = Mock()
++    return session
++
++
++def test_full_snapshot_maps_every_field():
++    states = {
++        PRIO_ENTITY: _state(PRIO_ENTITY, "Heat"),
++        COMPR_POWER_ENTITY: _state(COMPR_POWER_ENTITY, "1.8"),
++        COMPR_STATE_ENTITY: _state(COMPR_STATE_ENTITY, "RUNNING"),
++        CHARGE_PUMP_SPEED_ENTITY: _state(CHARGE_PUMP_SPEED_ENTITY, "45"),
++        DEGREE_MINUTES_ENTITY: _state(DEGREE_MINUTES_ENTITY, "-120.5"),
++        HEAT_OFFSET_ENTITY: _state(HEAT_OFFSET_ENTITY, "1"),
++        CLIMATE_ENTITY: _state(
++            CLIMATE_ENTITY,
++            "heat",
++            {"current_temperature": 21.8, "temperature": 21.5},
++        ),
++        DHW_ENTITY: _state(
++            DHW_ENTITY,
++            "eco",
++            {"current_temperature": 49.5, "target_temp_high": 52, "target_temp_low": 48},
++        ),
++    }
++
++    with patch("core.nibe.live.requests.Session", return_value=_mock_session(states)):
++        snapshot = fetch_live_snapshot(BASE_URL, HEADERS)
++
++    assert snapshot["prio"] == "Heat"
++    assert snapshot["compressorPowerKw"] == 1.8
++    assert snapshot["compressorState"] == "RUNNING"  # text state, not coerced to float
++    assert snapshot["chargePumpSpeedPct"] == 45.0
++    assert snapshot["degreeMinutes"] == -120.5
++    assert snapshot["heatOffsetC"] == 1.0
++    assert snapshot["indoorActualC"] == 21.8
++    assert snapshot["indoorTargetC"] == 21.5
++    assert snapshot["dhwActualC"] == 49.5
++    assert snapshot["dhwTargetHighC"] == 52.0
++    assert snapshot["dhwTargetLowC"] == 48.0
++
++
++def test_unavailable_entity_reads_as_none_not_zero():
++    """A disabled/unavailable register must show up as None (the frontend's
++    cue to render "—"), never as a fabricated 0.0 that would look like a
++    real, if boring, reading."""
++    states = {
++        PRIO_ENTITY: _state(PRIO_ENTITY, "OFF"),
++        # COMPR_POWER_ENTITY deliberately omitted -> "unavailable" from the mock
++    }
++
++    with patch("core.nibe.live.requests.Session", return_value=_mock_session(states)):
++        snapshot = fetch_live_snapshot(BASE_URL, HEADERS)
++
++    assert snapshot["prio"] == "OFF"
++    assert snapshot["compressorPowerKw"] is None
++
++
++def test_everything_unavailable_returns_empty_dict():
++    with patch("core.nibe.live.requests.Session", return_value=_mock_session({})):
++        snapshot = fetch_live_snapshot(BASE_URL, HEADERS)
++
++    assert snapshot == {}
++
++
++def test_partial_failure_still_returns_what_succeeded():
++    """Home Assistant answering for some entities but not others (a couple
++    of registers genuinely down) should not hide the entities that did
++    come back — only a total failure collapses to {}."""
++    states = {
++        PRIO_ENTITY: _state(PRIO_ENTITY, "Hot Water"),
++        DEGREE_MINUTES_ENTITY: _state(DEGREE_MINUTES_ENTITY, "50"),
++    }
++
++    with patch("core.nibe.live.requests.Session", return_value=_mock_session(states)):
++        snapshot = fetch_live_snapshot(BASE_URL, HEADERS)
++
++    assert snapshot["prio"] == "Hot Water"
++    assert snapshot["degreeMinutes"] == 50.0
++    assert snapshot["compressorPowerKw"] is None
++    assert snapshot["indoorActualC"] is None
+diff --git a/home_energy_manager/frontend/src/App.tsx b/home_energy_manager/frontend/src/App.tsx
+index 2273a2c..9bfe4fa 100644
+--- a/home_energy_manager/frontend/src/App.tsx
++++ b/home_energy_manager/frontend/src/App.tsx
+@@ -4,10 +4,11 @@ import DashboardPage from './pages/DashboardPage';
+ import SavingsAnalysisPage from './pages/SavingsPage';
+ import InverterPage from './pages/InverterPage';
+ import InsightsPage from './pages/InsightsPage';
++import NibeDriftPage from './pages/NibeDriftPage';
+ import SetupWizardPage from './pages/SetupWizardPage';
+ import SettingsPage from './pages/SettingsPage';
+ import { useSettings } from './hooks/useSettings';
+-import { Home, TrendingUp, Brain, Zap, Sun, Moon, Settings } from 'lucide-react';
++import { Home, TrendingUp, Brain, Zap, Sun, Moon, Settings, Thermometer } from 'lucide-react';
+ import api from './lib/api';
+ import { ReportProblemProvider } from './components/ReportProblemContext';
+ import ReportProblemButton from './components/ReportProblemButton';
+@@ -85,7 +86,7 @@ const Navigation = () => {
+     // FIXED: Dashboard should be active for both "/" and when no specific page is selected
+     if (path === '/') {
+       // Dashboard is active for root path OR if we're not on any of the other specific pages
+-      const otherPages = ['/insights', '/savings', '/inverter', '/settings'];
++      const otherPages = ['/insights', '/savings', '/inverter', '/nibe', '/settings'];
+       const isOnOtherPage = otherPages.some(page => location.pathname.startsWith(page));
+       const isDashboardActive = location.pathname === '/' || !isOnOtherPage;
+       
+@@ -131,6 +132,14 @@ const Navigation = () => {
+         <Brain className="h-5 w-5" />
+         <span className="hidden sm:inline">Insights</span>
+       </Link>
++      <Link
++        to="/nibe"
++        className={`p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded flex items-center space-x-1 ${isActive('/nibe')}`}
++        title="Nibe drift just nu & historik"
++      >
++        <Thermometer className="h-5 w-5" />
++        <span className="hidden sm:inline">Nibe</span>
++      </Link>
+       <Link
+         to="/settings"
+         className={`p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded flex items-center space-x-1 ${isActive('/settings')}`}
+@@ -327,6 +336,7 @@ function App() {
+                   <Route path="/insights" element={<InsightsPage />} />
+                   <Route path="/savings" element={<SavingsAnalysisPage />} />
+                   <Route path="/inverter" element={<InverterPage />} />
++                  <Route path="/nibe" element={<NibeDriftPage />} />
+                   <Route path="/settings" element={<SettingsPage />} />
+                   <Route path="/system-health" element={<Navigate to="/settings?tab=system" replace />} />
+                   {/* Catch-all route: redirect any unmatched paths to dashboard */}
+diff --git a/home_energy_manager/frontend/src/components/NibeLiveCard.tsx b/home_energy_manager/frontend/src/components/NibeLiveCard.tsx
+new file mode 100644
+index 0000000..43fe24c
+--- /dev/null
++++ b/home_energy_manager/frontend/src/components/NibeLiveCard.tsx
+@@ -0,0 +1,156 @@
++import React from 'react';
++import { Activity, Droplet, Flame, Gauge, Thermometer, Zap } from 'lucide-react';
++import { useNibeLive } from '../hooks/useNibeLive';
++import {
++  dhwStatusColor,
++  dhwStatusLabel,
++  heatingStatusColor,
++  heatingStatusLabel,
++} from '../lib/nibeStatusLabels';
++
++// "Nibe drift" (2026-09-28): the real-time counterpart to NibeHistoryCharts'
++// multi-hour trends and NibeStatusCard's Dashboard summary — Håkan asked
++// for "driftdata, vad som sker för sekunden" (what's happening right now),
++// which the 30s-cached last-decision status alone can't show for power/
++// frequency/current. Polls GET /api/nibe/live every 10s via useNibeLive.
++//
++// Prio (sensor.prio_43086) is the headline: it's the pump's own single
++// source of truth for "what am I doing right now" (Off/Hot Water/Heat/
++// Pool) — found and enabled while investigating the heat/DHW priority
++// question (see the project status doc's Fas 4/Nibe-priority entry), kept
++// unused until this page gave it a home.
++
++const PRIO_LABELS: Record<string, string> = {
++  OFF: 'Av',
++  'Hot Water': 'Varmvatten',
++  Heat: 'Värme',
++  Pool: 'Pool',
++};
++
++// Static class strings, one per StatusColor — Tailwind's build only picks
++// up classes it can see literally in source, so `text-${color}-600`
++// (interpolated at runtime) would silently vanish from the production
++// CSS. Same reason StatusCard.tsx keeps its own colorClasses/
++// iconColorClasses maps instead of building class names dynamically.
++const STATUS_TEXT_CLASSES: Record<string, string> = {
++  blue: 'text-blue-600 dark:text-blue-400',
++  green: 'text-green-600 dark:text-green-400',
++  yellow: 'text-yellow-600 dark:text-yellow-400',
++  red: 'text-red-600 dark:text-red-400',
++  purple: 'text-purple-600 dark:text-purple-400',
++};
++
++function formatNumber(value: number | null, digits = 1): string {
++  return value === null ? '—' : value.toFixed(digits);
++}
++
++interface TileProps {
++  icon: React.ComponentType<{ className?: string }>;
++  label: string;
++  value: string;
++  unit?: string;
++  highlight?: 'yellow' | 'red';
++}
++
++function Tile({ icon: Icon, label, value, unit, highlight }: TileProps) {
++  const highlightClasses =
++    highlight === 'red'
++      ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-900/20'
++      : highlight === 'yellow'
++        ? 'border-yellow-300 bg-yellow-50 dark:border-yellow-800 dark:bg-yellow-900/20'
++        : 'border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800';
++
++  return (
++    <div className={`border rounded-lg p-4 ${highlightClasses}`}>
++      <div className="flex items-center text-sm text-gray-500 dark:text-gray-400 mb-1">
++        <Icon className="h-4 w-4 mr-1.5" />
++        {label}
++      </div>
++      <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">
++        {value}
++        {unit && <span className="text-sm font-normal text-gray-500 dark:text-gray-400 ml-1">{unit}</span>}
++      </div>
++    </div>
++  );
++}
++
++export default function NibeLiveCard() {
++  const { enabled, heating, dhw, live, error, loading } = useNibeLive();
++
++  const prioLabel = live.prio === null ? '—' : (PRIO_LABELS[live.prio] ?? live.prio);
++  const compressorRunning = live.compressorState !== null && live.compressorState !== 'STOPPED';
++
++  return (
++    <div className="space-y-4">
++      {error && (
++        <div className="text-sm text-red-600 dark:text-red-400">
++          Kunde inte nå live-API:t: {error}
++        </div>
++      )}
++
++      {/* Headline: what the pump's own Prio register says it's doing, plus
++          this app's own heating/DHW decision status (null/"Av" whenever
++          nibe.enabled is off — see useNibeLive's docstring, same
++          convention as NibeStatusCard). */}
++      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
++        <div className="border rounded-lg p-4 border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
++          <div className="flex items-center text-sm text-gray-500 dark:text-gray-400 mb-1">
++            <Flame className="h-4 w-4 mr-1.5" />
++            Prio (pumpens egen status)
++          </div>
++          <div className={`text-xl font-semibold ${compressorRunning ? 'text-orange-600 dark:text-orange-400' : 'text-gray-900 dark:text-gray-100'}`}>
++            {prioLabel}
++          </div>
++        </div>
++        <div className="border rounded-lg p-4 border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
++          <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">Rumsuppvärmning</div>
++          <div className={`text-base font-semibold ${enabled ? STATUS_TEXT_CLASSES[heatingStatusColor(heating.status)] : STATUS_TEXT_CLASSES.blue}`}>
++            {enabled ? heatingStatusLabel(heating.status) : 'Av'}
++          </div>
++        </div>
++        <div className="border rounded-lg p-4 border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
++          <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">Varmvatten (Lyxläge-styrning)</div>
++          <div className={`text-base font-semibold ${enabled ? STATUS_TEXT_CLASSES[dhwStatusColor(dhw.status)] : STATUS_TEXT_CLASSES.blue}`}>
++            {enabled ? dhwStatusLabel(dhw.status) : 'Av'}
++          </div>
++        </div>
++      </div>
++
++      {/* Compressor detail */}
++      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
++        <Tile icon={Zap} label="Kompressor, ineffekt" value={formatNumber(live.compressorPowerKw, 2)} unit="kW" />
++        <Tile icon={Zap} label="Kompressor, medeleffekt" value={formatNumber(live.compressorPowerMeanKw, 2)} unit="kW" />
++        <Tile icon={Activity} label="Kompressorfrekvens" value={formatNumber(live.compressorFrequencyHz, 0)} unit="Hz" />
++        <Tile icon={Activity} label="Kompressorström" value={formatNumber(live.compressorCurrentA, 1)} unit="A" />
++        <Tile
++          icon={Zap}
++          label="Eltillsats"
++          value={formatNumber(live.electricAdditionKw, 2)}
++          unit="kW"
++          highlight={live.electricAdditionKw !== null && live.electricAdditionKw > 0 ? 'yellow' : undefined}
++        />
++        <Tile
++          icon={Gauge}
++          label="Gradminuter"
++          value={formatNumber(live.degreeMinutes, 0)}
++          unit="DM"
++          highlight={live.degreeMinutes !== null && live.degreeMinutes <= -400 ? 'red' : undefined}
++        />
++        <Tile icon={Gauge} label="Laddpump GP1" value={formatNumber(live.chargePumpSpeedPct, 0)} unit="%" />
++        <Tile icon={Gauge} label="Framledningspump" value={formatNumber(live.supplyPumpSpeedPct, 0)} unit="%" />
++      </div>
++
++      {/* Temperatures + applied curve offset */}
++      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
++        <Tile icon={Thermometer} label="Rumstemp, verklig" value={formatNumber(live.indoorActualC)} unit="°C" />
++        <Tile icon={Thermometer} label="Rumstemp, mål" value={formatNumber(live.indoorTargetC)} unit="°C" />
++        <Tile icon={Droplet} label="Varmvatten, verklig" value={formatNumber(live.dhwActualC)} unit="°C" />
++        <Tile icon={Gauge} label="Kurvoffset, tillämpad" value={formatNumber(live.heatOffsetC, 0)} unit="°C" />
++      </div>
++
++      {loading && live.prio === null && (
++        <div className="text-sm text-gray-400 dark:text-gray-500">Hämtar driftdata…</div>
++      )}
++    </div>
++  );
++}
+diff --git a/home_energy_manager/frontend/src/components/NibeStatusCard.tsx b/home_energy_manager/frontend/src/components/NibeStatusCard.tsx
+index 4a44de7..7c8a9a7 100644
+--- a/home_energy_manager/frontend/src/components/NibeStatusCard.tsx
++++ b/home_energy_manager/frontend/src/components/NibeStatusCard.tsx
+@@ -1,36 +1,11 @@
+ import { Flame } from 'lucide-react';
+ import { StatusCard } from './SystemStatusCard';
+ import { useNibeStatus } from '../hooks/useNibeStatus';
+-
+-// Swedish labels for decide_heating_boost()'s status values
+-// (core/nibe/decision.py), plus the state that never comes from decide()
+-// itself: the module switched off entirely (nibe.enabled).
+-const HEATING_STATUS_LABELS: Record<string, string> = {
+-  no_data: 'Ingen data',
+-  no_headroom: 'Normalläge — effektvakten saknar utrymme',
+-  engaged_cheap_price: 'Extra värme — billig timme',
+-  engaged_solar_surplus: 'Extra värme — solöverskott',
+-  normal: 'Normalläge',
+-  watchdog_reset: 'Säkerhetsåterställd till normalläge — ingen kontakt med pumpen på länge',
+-};
+-
+-const HEATING_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' | 'purple'> = {
+-  no_data: 'red',
+-  no_headroom: 'yellow',
+-  engaged_cheap_price: 'green',
+-  engaged_solar_surplus: 'green',
+-  normal: 'blue',
+-  watchdog_reset: 'red',
+-};
+-
+-// Swedish labels for decide_dhw_luxury()'s status values.
+-const DHW_STATUS_LABELS: Record<string, string> = {
+-  disabled: 'Av',
+-  no_headroom: 'Ekonomi — effektvakten saknar utrymme',
+-  luxury_cheap_price: 'Lyxläge — billig timme',
+-  luxury_solar_surplus: 'Lyxläge — solöverskott',
+-  economy_no_condition: 'Ekonomi',
+-};
++import {
++  dhwStatusLabel,
++  heatingStatusColor,
++  heatingStatusLabel,
++} from '../lib/nibeStatusLabels';
+ 
+ /**
+  * Fas 4a's one visible piece of Nibe UI: the space-heating curve-offset
+@@ -60,20 +35,16 @@ export default function NibeStatusCard() {
+ 
+   const heatingValue = !enabled
+     ? 'Av'
+-    : heating.status !== null
+-      ? (HEATING_STATUS_LABELS[heating.status] ?? heating.status) +
+-        (heating.offsetC ? ` (offset +${heating.offsetC})` : '')
+-      : 'Väntar på första mätningen…';
++    : heatingStatusLabel(heating.status) +
++      (heating.offsetC ? ` (offset +${heating.offsetC})` : '');
+ 
+-  const heatingColor = !enabled ? 'blue' : heating.status !== null ? (HEATING_STATUS_COLORS[heating.status] ?? 'blue') : 'blue';
++  const heatingColor = !enabled ? 'blue' : heatingStatusColor(heating.status);
+ 
+   const dhwValue = !enabled
+     ? 'Av'
+     : !dhwLuxuryEnabled
+       ? 'Av'
+-      : dhw.status !== null
+-        ? (DHW_STATUS_LABELS[dhw.status] ?? dhw.status)
+-        : 'Väntar på första mätningen…';
++      : dhwStatusLabel(dhw.status);
+ 
+   return (
+     <StatusCard
+diff --git a/home_energy_manager/frontend/src/hooks/useNibeLive.ts b/home_energy_manager/frontend/src/hooks/useNibeLive.ts
+new file mode 100644
+index 0000000..7595e35
+--- /dev/null
++++ b/home_energy_manager/frontend/src/hooks/useNibeLive.ts
+@@ -0,0 +1,102 @@
++import { useCallback, useEffect, useState } from 'react';
++import api from '../lib/api';
++import { DhwStatus, HeatingStatus } from '../lib/nibeStatusLabels';
++
++// Mirrors GET /api/nibe/live's response shape (backend/nibe_api.py) —
++// the same settings/last-decision fields GET /api/nibe/status returns,
++// plus `live`, a fresh read straight from Home Assistant. Any `live`
++// field can be null (that entity unavailable right now), and the whole
++// `live` object is `{}` only if Home Assistant couldn't be reached at
++// all — see core/nibe/live.py's docstring.
++export interface NibeLiveResponse {
++  enabled: boolean;
++  dhwLuxuryEnabled: boolean;
++  heating: {
++    status: HeatingStatus | null;
++    offsetC: number | null;
++    reason: string | null;
++  };
++  dhw: {
++    status: DhwStatus | null;
++    comfortMode: 'luxury' | 'economy' | null;
++    reason: string | null;
++  };
++  live: {
++    prio: string | null;
++    compressorPowerKw: number | null;
++    compressorPowerMeanKw: number | null;
++    compressorCurrentA: number | null;
++    compressorFrequencyHz: number | null;
++    compressorState: string | null;
++    chargePumpSpeedPct: number | null;
++    supplyPumpSpeedPct: number | null;
++    electricAdditionKw: number | null;
++    degreeMinutes: number | null;
++    heatOffsetC: number | null;
++    indoorActualC: number | null;
++    indoorTargetC: number | null;
++    dhwActualC: number | null;
++    dhwTargetHighC: number | null;
++    dhwTargetLowC: number | null;
++  };
++}
++
++const EMPTY_LIVE: NibeLiveResponse = {
++  enabled: false,
++  dhwLuxuryEnabled: false,
++  heating: { status: null, offsetC: null, reason: null },
++  dhw: { status: null, comfortMode: null, reason: null },
++  live: {
++    prio: null,
++    compressorPowerKw: null,
++    compressorPowerMeanKw: null,
++    compressorCurrentA: null,
++    compressorFrequencyHz: null,
++    compressorState: null,
++    chargePumpSpeedPct: null,
++    supplyPumpSpeedPct: null,
++    electricAdditionKw: null,
++    degreeMinutes: null,
++    heatOffsetC: null,
++    indoorActualC: null,
++    indoorTargetC: null,
++    dhwActualC: null,
++    dhwTargetHighC: null,
++    dhwTargetLowC: null,
++  },
++};
++
++// Polled every 10s — much faster than useNibeStatus's 30s, since this
++// page's whole point is "what's happening right now" (compressor power/
++// frequency swing on the order of seconds, not the 30s cadence
++// _poll_nibe's own curve-offset decisions run on). Each tick is one
++// request that does several HA reads server-side (see core/nibe/live.py),
++// so 10s stays comfortably below anything that would stress a local HA
++// instance or the Modbus gateway behind it.
++const LIVE_REFRESH_MS = 10_000;
++
++export function useNibeLive() {
++  const [data, setData] = useState<NibeLiveResponse>(EMPTY_LIVE);
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(true);
++
++  const fetchLive = useCallback(async () => {
++    try {
++      const res = await api.get<NibeLiveResponse>('/api/nibe/live');
++      setData(res.data);
++      setError(null);
++    } catch (err) {
++      setError(err instanceof Error ? err.message : 'Failed to reach Nibe live API');
++    } finally {
++      setLoading(false);
++    }
++  }, []);
++
++  useEffect(() => {
++    fetchLive();
++    const interval = setInterval(fetchLive, LIVE_REFRESH_MS);
++    return () => clearInterval(interval);
++  }, [fetchLive]);
++
++  return { ...data, loading, error };
++}
+diff --git a/home_energy_manager/frontend/src/hooks/useNibeStatus.ts b/home_energy_manager/frontend/src/hooks/useNibeStatus.ts
+index 58c093a..f97b2b2 100644
+--- a/home_energy_manager/frontend/src/hooks/useNibeStatus.ts
++++ b/home_energy_manager/frontend/src/hooks/useNibeStatus.ts
+@@ -1,31 +1,23 @@
+ import { useCallback, useEffect, useState } from 'react';
+ import api from '../lib/api';
++import { DhwStatus, HeatingStatus } from '../lib/nibeStatusLabels';
+ 
+ // Mirrors the backend response shape from GET /api/nibe/status
+-// (backend/nibe_api.py) exactly, camelCase included.
++// (backend/nibe_api.py) exactly, camelCase included. The status unions
++// live in lib/nibeStatusLabels.ts (one definition, shared with the label
++// maps) rather than being repeated here — see that file's docstring for
++// why (Fas 4c/4d/4e added five status values that this type used to be
++// missing entirely).
+ export interface NibeStatusResponse {
+   enabled: boolean;
+   dhwLuxuryEnabled: boolean;
+   heating: {
+-    status:
+-      | 'no_data'
+-      | 'no_headroom'
+-      | 'engaged_cheap_price'
+-      | 'engaged_solar_surplus'
+-      | 'normal'
+-      | 'watchdog_reset'
+-      | null;
++    status: HeatingStatus | null;
+     offsetC: number | null;
+     reason: string | null;
+   };
+   dhw: {
+-    status:
+-      | 'disabled'
+-      | 'no_headroom'
+-      | 'luxury_cheap_price'
+-      | 'luxury_solar_surplus'
+-      | 'economy_no_condition'
+-      | null;
++    status: DhwStatus | null;
+     comfortMode: 'luxury' | 'economy' | null;
+     reason: string | null;
+   };
+diff --git a/home_energy_manager/frontend/src/lib/nibeStatusLabels.ts b/home_energy_manager/frontend/src/lib/nibeStatusLabels.ts
+new file mode 100644
+index 0000000..d6b1d55
+--- /dev/null
++++ b/home_energy_manager/frontend/src/lib/nibeStatusLabels.ts
+@@ -0,0 +1,101 @@
++// Swedish labels/colors for every status value core/nibe/decision.py's
++// decide_heating_boost() and decide_dhw_luxury() can return, shared by
++// NibeStatusCard.tsx and NibeLiveCard.tsx so there is exactly one place to
++// keep this in sync with decision.py.
++//
++// HISTORY: NibeStatusCard.tsx originally kept its own copy of these two
++// maps, written for Fas 4a/4b and never updated as Fas 4c/4d/4e added five
++// more status values (engaged_price_spike_ahead, reduced_expensive_price,
++// blocked_low_degree_minutes, suppressed_anti_flap,
++// forced_normal_legionella_guard) — an unknown status still rendered fine
++// (both call sites fall back to the raw status string via `?? status`),
++// but with the English decision.py identifier instead of a Swedish label.
++// Pulled out into its own module 2026-09-28 when building the "Nibe drift"
++// page, which needed the same maps, so the fix lands in one place instead
++// of two copies drifting again.
++
++export type HeatingStatus =
++  | 'no_data'
++  | 'no_headroom'
++  | 'blocked_low_degree_minutes'
++  | 'engaged_cheap_price'
++  | 'engaged_solar_surplus'
++  | 'engaged_price_spike_ahead'
++  | 'reduced_expensive_price'
++  | 'suppressed_anti_flap'
++  | 'normal'
++  | 'watchdog_reset';
++
++export type DhwStatus =
++  | 'disabled'
++  | 'no_headroom'
++  | 'luxury_cheap_price'
++  | 'luxury_solar_surplus'
++  | 'economy_no_condition'
++  | 'forced_normal_legionella_guard';
++
++export type StatusColor = 'blue' | 'green' | 'yellow' | 'red' | 'purple';
++
++export const HEATING_STATUS_LABELS: Record<HeatingStatus, string> = {
++  no_data: 'Ingen data',
++  no_headroom: 'Normalläge — effektvakten saknar utrymme',
++  blocked_low_degree_minutes: 'Normalläge — gradminutsgolv når (eltillsatsrisk)',
++  engaged_cheap_price: 'Extra värme — billig timme',
++  engaged_solar_surplus: 'Extra värme — solöverskott',
++  engaged_price_spike_ahead: 'Extra värme — förvärmer inför kommande prisspik',
++  reduced_expensive_price: 'Sänkt värme — dyr timme',
++  suppressed_anti_flap: 'Håller kvar föregående läge (anti-flap, nyss ändrad)',
++  normal: 'Normalläge',
++  watchdog_reset: 'Säkerhetsåterställd till normalläge — ingen kontakt med pumpen på länge',
++};
++
++export const HEATING_STATUS_COLORS: Record<HeatingStatus, StatusColor> = {
++  no_data: 'red',
++  no_headroom: 'yellow',
++  blocked_low_degree_minutes: 'yellow',
++  engaged_cheap_price: 'green',
++  engaged_solar_surplus: 'green',
++  engaged_price_spike_ahead: 'green',
++  reduced_expensive_price: 'blue',
++  suppressed_anti_flap: 'blue',
++  normal: 'blue',
++  watchdog_reset: 'red',
++};
++
++export const DHW_STATUS_LABELS: Record<DhwStatus, string> = {
++  disabled: 'Av',
++  no_headroom: 'Ekonomi — effektvakten saknar utrymme',
++  luxury_cheap_price: 'Lyxläge — billig timme',
++  luxury_solar_surplus: 'Lyxläge — solöverskott',
++  economy_no_condition: 'Ekonomi',
++  forced_normal_legionella_guard: 'Normal — legionellaskydd (Ekonomi för länge sammanhängande)',
++};
++
++export const DHW_STATUS_COLORS: Record<DhwStatus, StatusColor> = {
++  disabled: 'blue',
++  no_headroom: 'yellow',
++  luxury_cheap_price: 'green',
++  luxury_solar_surplus: 'green',
++  economy_no_condition: 'blue',
++  forced_normal_legionella_guard: 'yellow',
++};
++
++export function heatingStatusLabel(status: string | null): string {
++  if (status === null) return 'Väntar på första mätningen…';
++  return HEATING_STATUS_LABELS[status as HeatingStatus] ?? status;
++}
++
++export function heatingStatusColor(status: string | null): StatusColor {
++  if (status === null) return 'blue';
++  return HEATING_STATUS_COLORS[status as HeatingStatus] ?? 'blue';
++}
++
++export function dhwStatusLabel(status: string | null): string {
++  if (status === null) return 'Väntar på första mätningen…';
++  return DHW_STATUS_LABELS[status as DhwStatus] ?? status;
++}
++
++export function dhwStatusColor(status: string | null): StatusColor {
++  if (status === null) return 'blue';
++  return DHW_STATUS_COLORS[status as DhwStatus] ?? 'blue';
++}
+diff --git a/home_energy_manager/frontend/src/pages/NibeDriftPage.tsx b/home_energy_manager/frontend/src/pages/NibeDriftPage.tsx
+new file mode 100644
+index 0000000..5b2a8e4
+--- /dev/null
++++ b/home_energy_manager/frontend/src/pages/NibeDriftPage.tsx
+@@ -0,0 +1,30 @@
++import NibeLiveCard from '../components/NibeLiveCard';
++import NibeHistoryCharts from '../components/NibeHistoryCharts';
++
++// New dedicated Nibe page (2026-09-28), built at Håkan's explicit request:
++// "vad som sker för sekunden" — real-time operating data, which the
++// Dashboard's NibeStatusCard (a 30s-cached last-decision summary) and
++// NibeHistoryCharts (hourly trends) don't show on their own. Both existing
++// components stay exactly where they are on the Dashboard too; this page
++// is additive, not a replacement, and simply gives Nibe its own place that
++// combines "right now" (NibeLiveCard, polls every 10s) with "the last
++// 24h/48h/7 days" (NibeHistoryCharts, unchanged) in one view.
++export default function NibeDriftPage() {
++  return (
++    <div className="space-y-8">
++      <div>
++        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
++          Nibe — drift just nu
++        </h2>
++        <NibeLiveCard />
++      </div>
++
++      <div>
++        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
++          Historik
++        </h2>
++        <NibeHistoryCharts />
++      </div>
++    </div>
++  );
++}
+diff --git a/home_energy_manager/frontend/src/types/lucide-react.d.ts b/home_energy_manager/frontend/src/types/lucide-react.d.ts
+index f363bcb..3fc8612 100644
+--- a/home_energy_manager/frontend/src/types/lucide-react.d.ts
++++ b/home_energy_manager/frontend/src/types/lucide-react.d.ts
+@@ -42,4 +42,7 @@ declare module 'lucide-react' {
+   export const Car: FC<IconProps>;
+   export const Shield: FC<IconProps>;
+   export const Flame: FC<IconProps>;
++  export const Thermometer: FC<IconProps>;
++  export const Droplet: FC<IconProps>;
++  export const Gauge: FC<IconProps>;
+ }
+\ No newline at end of file
+-- 
+2.43.0
+
