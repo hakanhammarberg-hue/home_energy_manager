@@ -18,6 +18,15 @@ Home Assistant directly, so they do — see core/nibe/history.py's and
 core/nibe/live.py's own docstrings for the full reasoning and why that I/O
 lives in its own core module rather than here.
 
+GET /api/nibe/savings (2026-09-28, dashboard compaction phase) is a third
+such exception, for the same reason as /history: estimating today's
+price-peak-reduction savings needs today's actually-applied heat_offset_s1
+history from Home Assistant, so it reaches in directly. The calculation
+itself is pure (core/nibe/savings.py) — this endpoint's only job is to
+assemble that module's inputs from history.py's HA read plus
+price_manager's already-cached today's prices, see that endpoint's own
+docstring below for the full reasoning.
+
 POST /api/nibe/dhw-luxury is the one write this router does, and mirrors
 POST /api/ev-scheduler/override in spirit: a narrow, dashboard-reachable
 toggle, separate from the general PATCH /api/settings mechanism the
@@ -33,6 +42,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from loguru import logger
 
+from core.bess import time_utils
 from core.nibe.history import (
     CLIMATE_ENTITY,
     CLIMATE_TARGET_KEY,
@@ -46,6 +56,7 @@ from core.nibe.history import (
     fetch_history_series,
 )
 from core.nibe.live import fetch_live_snapshot
+from core.nibe.savings import estimate_reduction_savings
 
 router = APIRouter()
 
@@ -179,6 +190,110 @@ async def get_nibe_live() -> dict:
     controller = bess_controller.nibe_controller
     payload["live"] = fetch_live_snapshot(controller.base_url, controller.headers)
     return payload
+
+
+@router.get("/api/nibe/savings")
+async def get_nibe_savings() -> dict:
+    """Today-so-far estimated savings from the price-peak reduction lever
+    (core/nibe/decision.py's FIFTH LEVER, "reduced_expensive_price") — see
+    core/nibe/savings.py's module docstring for the full methodology and
+    why it's scoped to today only and to this one lever.
+
+    Assembles two independent things onto the same hourly grid:
+      1. The actually-applied number.heat_offset_s1 register value for each
+         hour since local midnight, via history.py's existing HA-recorder
+         read (same source /api/nibe/history already uses).
+      2. That hour's spot price, averaged from today's already-cached
+         quarter-hourly buy-price array (core.bess.price_manager) — the
+         same array _poll_nibe reads every cycle, so this costs no extra
+         Nordpool/price-source call.
+
+    Scoped to TODAY ONLY (not a rolling 24h/48h window like /history):
+    price_manager only ever holds the CURRENT day's full price array —
+    there is no retained "yesterday's prices" to align against a rolling
+    window that crosses midnight, so extending this past today would mean
+    silently pairing some hours with the wrong day's price. Today-so-far is
+    the honest boundary of what's actually computable right now (see the
+    design doc's Del 2 for the 2-day-window future-work note).
+
+    Returns a zeroed estimate (not an error) whenever Home Assistant's
+    history endpoint or the price source has nothing yet — same
+    None/empty-tolerant convention as /api/nibe/history and
+    /api/nibe/status.
+    """
+    from app import bess_controller
+
+    controller = bess_controller.nibe_controller
+    tz = time_utils.TIMEZONE
+    now_local = datetime.now(tz)
+    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    hours_elapsed = max(1, int((now_local - midnight_local).total_seconds() // 3600) + 1)
+
+    empty_response = {
+        "hours": [],
+        "totalAvoidedKwh": 0.0,
+        "totalSavingsKr": 0.0,
+        "activeHours": 0,
+        "heatLossCoefficientKwPerC": None,
+        "assumedCop": None,
+    }
+
+    # Same "one extra lookback hour, then drop it" padding /api/nibe/history
+    # uses — build_hourly_series has no baseline for its very first bucket
+    # otherwise (see that function's own docstring).
+    series = fetch_history_series(
+        controller.base_url, controller.headers, hours_elapsed + 1, [HEAT_OFFSET_ENTITY]
+    )
+    if not series or not series.get(HEAT_OFFSET_ENTITY):
+        return empty_response
+
+    end_utc = now_local.astimezone(UTC)
+    start_utc = midnight_local.astimezone(UTC)
+    rows = build_hourly_series(series, start_utc - timedelta(hours=1), end_utc)[1:]
+    if not rows:
+        return empty_response
+
+    try:
+        today_prices_ore = [
+            p * 100 for p in bess_controller.system.price_manager.get_buy_prices()
+        ]
+    except Exception as e:
+        logger.debug("Could not read today's prices for Nibe savings estimate: %s", e)
+        today_prices_ore = []
+
+    periods_per_hour = time_utils.PERIODS_PER_HOUR
+    hourly_inputs: list[tuple[str, float | None, float | None]] = []
+    for row in rows:
+        bucket_end_local = datetime.fromisoformat(row["timestamp"]).astimezone(tz)
+        # build_hourly_series timestamps a bucket by its END — the hour of
+        # day this bucket actually COVERS is one hour earlier.
+        hour_of_day = (bucket_end_local.hour - 1) % 24
+        start_period = hour_of_day * periods_per_hour
+        end_period = start_period + periods_per_hour
+        quarter_prices = today_prices_ore[start_period:end_period]
+        price_ore = sum(quarter_prices) / len(quarter_prices) if quarter_prices else None
+        hourly_inputs.append((row["timestamp"], row.get(HEAT_OFFSET_ENTITY), price_ore))
+
+    estimate = estimate_reduction_savings(hourly_inputs)
+
+    return {
+        "hours": [
+            {
+                "timestamp": hour.timestamp,
+                "offsetC": hour.offset_c,
+                "priceOrePerKwh": hour.price_ore_per_kwh,
+                "active": hour.active,
+                "avoidedKwh": hour.avoided_kwh,
+                "savingsKr": hour.savings_kr,
+            }
+            for hour in estimate.hours
+        ],
+        "totalAvoidedKwh": estimate.total_avoided_kwh,
+        "totalSavingsKr": estimate.total_savings_kr,
+        "activeHours": estimate.active_hours,
+        "heatLossCoefficientKwPerC": estimate.heat_loss_coefficient_kw_per_c,
+        "assumedCop": estimate.assumed_cop,
+    }
 
 
 @router.post("/api/nibe/dhw-luxury")

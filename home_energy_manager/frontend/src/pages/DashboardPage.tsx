@@ -6,11 +6,7 @@ import { BatterySettings, ElectricitySettings } from '../types';
 import { Clock, AlertCircle } from 'lucide-react';
 import EnergyFlowCards from '../components/EnergyFlowCards';
 import SystemStatusCard from '../components/SystemStatusCard';
-import PerificPowerCard from '../components/PerificPowerCard';
-import GovernorStatusCard from '../components/GovernorStatusCard';
-import EvSchedulerStatusCard from '../components/EvSchedulerStatusCard';
-import NibeStatusCard from '../components/NibeStatusCard';
-import NibeHistoryCharts from '../components/NibeHistoryCharts';
+import CompactStatusRow from '../components/CompactStatusRow';
 import BatterySocRangeCard from '../components/BatterySocRangeCard';
 import InverterWriteAccessCard from '../components/InverterWriteAccessCard';
 import AlertBanner from '../components/AlertBanner';
@@ -398,38 +394,17 @@ export default function DashboardPage({
             </div>
           </div>
 
-          {/* Fas 2: Perific One real-time power (home-energy-manager) */}
+          {/* Dashboard-compaction phase (2026-09-28): Perific One,
+              Effektvakt, EV-laddning and Nibe compacted into one row of
+              small square tiles, per Håkan's explicit ask — see
+              CompactStatusRow.tsx's own docstring. Nibe's detailed
+              controls/history (incl. "Lyxläge varmvatten") moved to the
+              dedicated /nibe page; only a compact savings/status summary
+              stays here. */}
           <div className="space-y-6">
             <div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Perific One</h2>
-              <PerificPowerCard />
-            </div>
-          </div>
-
-          {/* Fas 3b: peak-power governor (EV lever) status */}
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Effektvakt</h2>
-              <GovernorStatusCard />
-            </div>
-          </div>
-
-          {/* Fas 5c: EV price/SOC/solar scheduler status */}
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">EV-laddning</h2>
-              <EvSchedulerStatusCard />
-            </div>
-          </div>
-
-          {/* Fas 4a: Nibe F750 SG Ready heating boost + Lyxläge varmvatten */}
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Nibe</h2>
-              <NibeStatusCard />
-              <div className="mt-6">
-                <NibeHistoryCharts />
-              </div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Status</h2>
+              <CompactStatusRow />
             </div>
           </div>
 
