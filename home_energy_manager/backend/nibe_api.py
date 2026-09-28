@@ -11,11 +11,12 @@ and acted on. Recomputing a fresh decision here instead would mean the
 dashboard could show a hypothetical outcome that was never actually applied
 (see governor_api.py's docstring — same argument).
 
-GET /api/nibe/history (Fas 5, 2026-09-24) is the deliberate exception: a
-history/charting endpoint has no way to avoid reaching into Home
-Assistant's own recorder, so it does — see core/nibe/history.py's
-docstring for the full reasoning and why that I/O lives in its own core
-module rather than here.
+GET /api/nibe/history (Fas 5, 2026-09-24) and GET /api/nibe/live
+(2026-09-28) are the deliberate exceptions: a history/charting endpoint
+and a real-time snapshot endpoint both have no way to avoid reaching into
+Home Assistant directly, so they do — see core/nibe/history.py's and
+core/nibe/live.py's own docstrings for the full reasoning and why that I/O
+lives in its own core module rather than here.
 
 POST /api/nibe/dhw-luxury is the one write this router does, and mirrors
 POST /api/ev-scheduler/override in spirit: a narrow, dashboard-reachable
@@ -44,6 +45,7 @@ from core.nibe.history import (
     build_hourly_series,
     fetch_history_series,
 )
+from core.nibe.live import fetch_live_snapshot
 
 router = APIRouter()
 
@@ -154,6 +156,29 @@ async def get_nibe_history(hours: int = 48) -> dict:
         )
 
     return {"periods": periods}
+
+
+@router.get("/api/nibe/live")
+async def get_nibe_live() -> dict:
+    """Real-time snapshot for the "Nibe drift" page (2026-09-28): the same
+    settings/last-decision payload GET /api/nibe/status returns, plus a
+    fresh, uncached `live` read of the pump's current compressor power/
+    frequency/current, Prio, degree minutes, pump speeds, electric-addition
+    power and applied curve offset/temperatures straight from Home
+    Assistant — see core/nibe/live.py's docstring for why this is, like
+    GET /api/nibe/history, a deliberate exception to this router's usual
+    zero-I/O rule.
+
+    `live` is `{}` whenever Home Assistant can't be reached at all (a
+    partial read still returns whatever succeeded) — same empty-on-failure
+    convention as GET /api/nibe/history's `periods`.
+    """
+    from app import bess_controller
+
+    payload = _status_payload(bess_controller)
+    controller = bess_controller.nibe_controller
+    payload["live"] = fetch_live_snapshot(controller.base_url, controller.headers)
+    return payload
 
 
 @router.post("/api/nibe/dhw-luxury")

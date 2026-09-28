@@ -1,31 +1,23 @@
 import { useCallback, useEffect, useState } from 'react';
 import api from '../lib/api';
+import { DhwStatus, HeatingStatus } from '../lib/nibeStatusLabels';
 
 // Mirrors the backend response shape from GET /api/nibe/status
-// (backend/nibe_api.py) exactly, camelCase included.
+// (backend/nibe_api.py) exactly, camelCase included. The status unions
+// live in lib/nibeStatusLabels.ts (one definition, shared with the label
+// maps) rather than being repeated here — see that file's docstring for
+// why (Fas 4c/4d/4e added five status values that this type used to be
+// missing entirely).
 export interface NibeStatusResponse {
   enabled: boolean;
   dhwLuxuryEnabled: boolean;
   heating: {
-    status:
-      | 'no_data'
-      | 'no_headroom'
-      | 'engaged_cheap_price'
-      | 'engaged_solar_surplus'
-      | 'normal'
-      | 'watchdog_reset'
-      | null;
+    status: HeatingStatus | null;
     offsetC: number | null;
     reason: string | null;
   };
   dhw: {
-    status:
-      | 'disabled'
-      | 'no_headroom'
-      | 'luxury_cheap_price'
-      | 'luxury_solar_surplus'
-      | 'economy_no_condition'
-      | null;
+    status: DhwStatus | null;
     comfortMode: 'luxury' | 'economy' | null;
     reason: string | null;
   };

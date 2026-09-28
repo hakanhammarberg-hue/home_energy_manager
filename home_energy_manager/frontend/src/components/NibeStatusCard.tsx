@@ -1,36 +1,11 @@
 import { Flame } from 'lucide-react';
 import { StatusCard } from './SystemStatusCard';
 import { useNibeStatus } from '../hooks/useNibeStatus';
-
-// Swedish labels for decide_heating_boost()'s status values
-// (core/nibe/decision.py), plus the state that never comes from decide()
-// itself: the module switched off entirely (nibe.enabled).
-const HEATING_STATUS_LABELS: Record<string, string> = {
-  no_data: 'Ingen data',
-  no_headroom: 'Normalläge — effektvakten saknar utrymme',
-  engaged_cheap_price: 'Extra värme — billig timme',
-  engaged_solar_surplus: 'Extra värme — solöverskott',
-  normal: 'Normalläge',
-  watchdog_reset: 'Säkerhetsåterställd till normalläge — ingen kontakt med pumpen på länge',
-};
-
-const HEATING_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' | 'purple'> = {
-  no_data: 'red',
-  no_headroom: 'yellow',
-  engaged_cheap_price: 'green',
-  engaged_solar_surplus: 'green',
-  normal: 'blue',
-  watchdog_reset: 'red',
-};
-
-// Swedish labels for decide_dhw_luxury()'s status values.
-const DHW_STATUS_LABELS: Record<string, string> = {
-  disabled: 'Av',
-  no_headroom: 'Ekonomi — effektvakten saknar utrymme',
-  luxury_cheap_price: 'Lyxläge — billig timme',
-  luxury_solar_surplus: 'Lyxläge — solöverskott',
-  economy_no_condition: 'Ekonomi',
-};
+import {
+  dhwStatusLabel,
+  heatingStatusColor,
+  heatingStatusLabel,
+} from '../lib/nibeStatusLabels';
 
 /**
  * Fas 4a's one visible piece of Nibe UI: the space-heating curve-offset
@@ -60,20 +35,16 @@ export default function NibeStatusCard() {
 
   const heatingValue = !enabled
     ? 'Av'
-    : heating.status !== null
-      ? (HEATING_STATUS_LABELS[heating.status] ?? heating.status) +
-        (heating.offsetC ? ` (offset +${heating.offsetC})` : '')
-      : 'Väntar på första mätningen…';
+    : heatingStatusLabel(heating.status) +
+      (heating.offsetC ? ` (offset +${heating.offsetC})` : '');
 
-  const heatingColor = !enabled ? 'blue' : heating.status !== null ? (HEATING_STATUS_COLORS[heating.status] ?? 'blue') : 'blue';
+  const heatingColor = !enabled ? 'blue' : heatingStatusColor(heating.status);
 
   const dhwValue = !enabled
     ? 'Av'
     : !dhwLuxuryEnabled
       ? 'Av'
-      : dhw.status !== null
-        ? (DHW_STATUS_LABELS[dhw.status] ?? dhw.status)
-        : 'Väntar på första mätningen…';
+      : dhwStatusLabel(dhw.status);
 
   return (
     <StatusCard

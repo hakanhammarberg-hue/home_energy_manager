@@ -42,4 +42,7 @@ declare module 'lucide-react' {
   export const Car: FC<IconProps>;
   export const Shield: FC<IconProps>;
   export const Flame: FC<IconProps>;
+  export const Thermometer: FC<IconProps>;
+  export const Droplet: FC<IconProps>;
+  export const Gauge: FC<IconProps>;
 }

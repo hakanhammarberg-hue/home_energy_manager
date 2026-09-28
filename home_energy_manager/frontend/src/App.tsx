@@ -4,10 +4,11 @@ import DashboardPage from './pages/DashboardPage';
 import SavingsAnalysisPage from './pages/SavingsPage';
 import InverterPage from './pages/InverterPage';
 import InsightsPage from './pages/InsightsPage';
+import NibeDriftPage from './pages/NibeDriftPage';
 import SetupWizardPage from './pages/SetupWizardPage';
 import SettingsPage from './pages/SettingsPage';
 import { useSettings } from './hooks/useSettings';
-import { Home, TrendingUp, Brain, Zap, Sun, Moon, Settings } from 'lucide-react';
+import { Home, TrendingUp, Brain, Zap, Sun, Moon, Settings, Thermometer } from 'lucide-react';
 import api from './lib/api';
 import { ReportProblemProvider } from './components/ReportProblemContext';
 import ReportProblemButton from './components/ReportProblemButton';
@@ -85,7 +86,7 @@ const Navigation = () => {
     // FIXED: Dashboard should be active for both "/" and when no specific page is selected
     if (path === '/') {
       // Dashboard is active for root path OR if we're not on any of the other specific pages
-      const otherPages = ['/insights', '/savings', '/inverter', '/settings'];
+      const otherPages = ['/insights', '/savings', '/inverter', '/nibe', '/settings'];
       const isOnOtherPage = otherPages.some(page => location.pathname.startsWith(page));
       const isDashboardActive = location.pathname === '/' || !isOnOtherPage;
       
@@ -130,6 +131,14 @@ const Navigation = () => {
       >
         <Brain className="h-5 w-5" />
         <span className="hidden sm:inline">Insights</span>
+      </Link>
+      <Link
+        to="/nibe"
+        className={`p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded flex items-center space-x-1 ${isActive('/nibe')}`}
+        title="Nibe drift just nu & historik"
+      >
+        <Thermometer className="h-5 w-5" />
+        <span className="hidden sm:inline">Nibe</span>
       </Link>
       <Link
         to="/settings"
@@ -327,6 +336,7 @@ function App() {
                   <Route path="/insights" element={<InsightsPage />} />
                   <Route path="/savings" element={<SavingsAnalysisPage />} />
                   <Route path="/inverter" element={<InverterPage />} />
+                  <Route path="/nibe" element={<NibeDriftPage />} />
                   <Route path="/settings" element={<SettingsPage />} />
                   <Route path="/system-health" element={<Navigate to="/settings?tab=system" replace />} />
                   {/* Catch-all route: redirect any unmatched paths to dashboard */}
