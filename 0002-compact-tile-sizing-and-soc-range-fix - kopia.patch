@@ -1,0 +1,272 @@
+From f18a76c39998f0e225f44b532ef486ef70a8d795 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 29 Sep 2026 09:30:19 +0000
+Subject: [PATCH] Fix compact status tile sizing and battery SOC-range window
+ honesty
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+CompactStatusCard used aspect-square, which on the row's wide
+sm:grid-cols-4 columns produced tall tiles with a lot of empty space —
+the opposite of compact. Height now follows the actual content (header
+row, one value, one status line).
+
+The battery SOC-range diagnostic always reported the fixed target
+window (72h/"3 dygn") regardless of how much history the in-memory
+sample buffer actually held. That buffer empties on every add-on
+restart and only grows back out over the following days, so right
+after a restart the card was claiming a 3-day range while really
+showing barely an hour of data. windowHours is now the buffer's actual
+current span, with targetWindowHours reported separately so the UI can
+show a "still filling up" note instead of a false multi-day claim.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ .../backend/diagnostics_api.py                | 36 +++++++++++++-----
+ home_energy_manager/config.yaml               |  2 +-
+ .../src/components/BatterySocRangeCard.tsx    | 37 +++++++++++++++++--
+ .../src/components/CompactStatusCard.tsx      | 31 ++++++++++------
+ .../frontend/src/hooks/useBatterySocRange.ts  | 11 +++++-
+ 5 files changed, 91 insertions(+), 26 deletions(-)
+
+diff --git a/home_energy_manager/backend/diagnostics_api.py b/home_energy_manager/backend/diagnostics_api.py
+index 02c2b8b..f1c92ad 100644
+--- a/home_energy_manager/backend/diagnostics_api.py
++++ b/home_energy_manager/backend/diagnostics_api.py
+@@ -10,6 +10,8 @@ read state that app.py's background polling (_poll_diagnostics, every 30s)
+ already collected, never touching Home Assistant directly on request.
+ """
+ 
++import time
++
+ from fastapi import APIRouter
+ 
+ router = APIRouter()
+@@ -20,32 +22,48 @@ async def get_battery_soc_range() -> dict:
+     """Return the rolling battery SOC range app.py has sampled so far.
+ 
+     Response shape (camelCase, matches the rest of the API):
+-        {"minPercent": 10.0, "maxPercent": 63.0, "windowHours": 72.0, "sampleCount": 4213}
+-        {"minPercent": None, "maxPercent": None, "windowHours": 72.0, "sampleCount": 0}
++        {"minPercent": 10.0, "maxPercent": 63.0, "windowHours": 71.4,
++         "targetWindowHours": 72.0, "sampleCount": 4213}
++        {"minPercent": None, "maxPercent": None, "windowHours": 0.0,
++         "targetWindowHours": 72.0, "sampleCount": 0}
+ 
+     ``sampleCount: 0`` (both percents null) is the normal state right after
+-    startup, before the first successful SOC read — not an error. The
+-    window is a rolling BATTERY_SOC_RANGE_WINDOW_SECONDS (app.py), not a
+-    calendar day: it slides forward continuously rather than resetting at
+-    midnight, so it always reflects "the last few days," matching what
+-    prompted adding it.
++    startup, before the first successful SOC read — not an error.
++
++    ``windowHours`` is the ACTUAL span currently covered by
++    ``battery_soc_samples`` (now minus the oldest sample still held), not
++    the target. ``battery_soc_samples`` lives only in process memory, so it
++    empties on every add-on restart (an update install, a crash, a manual
++    restart) and only grows back out to BATTERY_SOC_RANGE_WINDOW_SECONDS
++    (app.py) over the following days — until then this is honestly a
++    shorter window than the target, and reporting the fixed target here
++    made the card claim "senaste 3 dygn" while actually showing barely an
++    hour of post-restart data (caught 2026-09-29: Håkan noticed the shown
++    range looked like it only reflected the last hour or so). The frontend
++    uses ``targetWindowHours`` to label the steady-state goal and to show
++    a "still filling up" note while ``windowHours`` hasn't caught up to it.
+     """
+     from app import BATTERY_SOC_RANGE_WINDOW_SECONDS, bess_controller
+ 
++    target_window_hours = BATTERY_SOC_RANGE_WINDOW_SECONDS / 3600
+     samples = bess_controller.battery_soc_samples
+     if not samples:
+         return {
+             "minPercent": None,
+             "maxPercent": None,
+-            "windowHours": BATTERY_SOC_RANGE_WINDOW_SECONDS / 3600,
++            "windowHours": 0.0,
++            "targetWindowHours": target_window_hours,
+             "sampleCount": 0,
+         }
+ 
+     values = [soc for _timestamp, soc in samples]
++    oldest_timestamp = samples[0][0]
++    actual_window_hours = min((time.time() - oldest_timestamp) / 3600, target_window_hours)
+     return {
+         "minPercent": min(values),
+         "maxPercent": max(values),
+-        "windowHours": BATTERY_SOC_RANGE_WINDOW_SECONDS / 3600,
++        "windowHours": actual_window_hours,
++        "targetWindowHours": target_window_hours,
+         "sampleCount": len(values),
+     }
+ 
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 436a855..40d247b 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.12"
++version: "0.1.13"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/frontend/src/components/BatterySocRangeCard.tsx b/home_energy_manager/frontend/src/components/BatterySocRangeCard.tsx
+index edf8bb5..9a240b0 100644
+--- a/home_energy_manager/frontend/src/components/BatterySocRangeCard.tsx
++++ b/home_energy_manager/frontend/src/components/BatterySocRangeCard.tsx
+@@ -8,12 +8,37 @@ import { useBatterySocRange } from '../hooks/useBatterySocRange';
+  * pattern invisible from BatteryLevelChart's single-day view. Mirrors
+  * PerificPowerCard's shape exactly: reuse StatusCard, self-fetching hook,
+  * no props.
++ *
++ * Fixed 2026-09-29: this used to label the range with the fixed target
++ * window (always "senaste 3 dygn"), even though the sample buffer lives
++ * only in process memory and empties on every add-on restart — right
++ * after a restart it takes days to grow back out to the target, so the
++ * card was claiming a 3-day range while actually showing barely an hour
++ * of data (which is what Håkan noticed). `windowHours` from the hook is
++ * now the buffer's actual current span, so the label and the note below
++ * are honest about how much history is really behind the shown min/max.
+  */
++function formatWindowLabel(hours: number): string {
++  if (hours < 1) return '< 1 h';
++  if (hours < 24) return `${Math.round(hours)} h`;
++  return `${Math.round(hours / 24)} dygn`;
++}
++
+ export default function BatterySocRangeCard() {
+-  const { minPercent, maxPercent, windowHours, sampleCount, error } = useBatterySocRange();
++  const { minPercent, maxPercent, windowHours, targetWindowHours, sampleCount, error } =
++    useBatterySocRange();
+ 
+   const hasRange = sampleCount > 0 && minPercent !== null && maxPercent !== null;
+-  const windowLabel = windowHours !== null ? `${Math.round(windowHours / 24)} dygn` : '';
++  const windowLabel = windowHours !== null ? formatWindowLabel(windowHours) : '';
++  // A full hour of slack before calling it "still filling up" avoids a
++  // permanent, pointless note once the buffer is essentially at target
++  // (it never exactly reaches targetWindowHours, since the oldest sample
++  // held is always at least one 30s poll old).
++  const stillFilling =
++    hasRange &&
++    windowHours !== null &&
++    targetWindowHours !== null &&
++    windowHours < targetWindowHours - 1;
+ 
+   return (
+     <StatusCard
+@@ -28,7 +53,13 @@ export default function BatterySocRangeCard() {
+           ? [`Kunde inte nå API:t: ${error}`]
+           : !hasRange
+             ? ['Ingen data än — fylls på i takt med att BESS pollar SOC.']
+-            : undefined
++            : stillFilling
++              ? [
++                  `Fyller fortfarande på efter omstart — når ${
++                    targetWindowHours !== null ? formatWindowLabel(targetWindowHours) : ''
++                  } inom några dygn.`,
++                ]
++              : undefined
+       }
+       metrics={[]}
+     />
+diff --git a/home_energy_manager/frontend/src/components/CompactStatusCard.tsx b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+index 3c827bb..500afa3 100644
+--- a/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
++++ b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+@@ -1,14 +1,23 @@
+ import React from 'react';
+ 
+-// Dashboard-compaction phase (2026-09-28): a small square status tile,
+-// sitting alongside StatusCard (SystemStatusCard.tsx) rather than replacing
+-// it — see claude/dashboard-compaction-and-nibe-savings-forslag.md's "Del 1"
+-// for the competitive-research writeup behind this shape. No single
+-// community HA card had a reusable "four square tiles in a row" component
+-// to copy; this synthesizes solar-bar-card's small icon+number "stat tile"
+-// pattern with the classic app-grid convention (icon, one headline number,
+-// a short status line) that Håkan asked for explicitly ("kvadratiska...
+-// bredvid varandra").
++// Dashboard-compaction phase (2026-09-28): a small status tile, sitting
++// alongside StatusCard (SystemStatusCard.tsx) rather than replacing it —
++// see claude/dashboard-compaction-and-nibe-savings-forslag.md's "Del 1" for
++// the competitive-research writeup behind this shape. No single community
++// HA card had a reusable "four square tiles in a row" component to copy;
++// this synthesizes solar-bar-card's small icon+number "stat tile" pattern
++// with the classic app-grid convention (icon, one headline number, a short
++// status line) that Håkan asked for explicitly ("kvadratiska... bredvid
++// varandra").
++//
++// Fixed 2026-09-29: the first version used `aspect-square` to get that
++// squareness, but on the row's wide `sm:grid-cols-4` columns a square sized
++// to the COLUMN WIDTH is very tall — the opposite of compact, and exactly
++// what Håkan's screenshot showed ("Rutorna kan bli mycket kompaktare").
++// Height now simply follows the content (header row + one value + one
++// status line), which is what "compact" actually means here; the tiles end
++// up wider than they are tall rather than perfectly square, which is the
++// right trade-off against Håkan's explicit follow-up feedback.
+ //
+ // Deliberately a MUCH smaller sibling of StatusCard, not a variant/prop on
+ // it: a compact tile shows exactly one headline value and one status line,
+@@ -62,9 +71,7 @@ export default function CompactStatusCard({
+   annotation,
+ }: CompactStatusCardProps) {
+   return (
+-    <div
+-      className={`border rounded-lg p-3 aspect-square flex flex-col justify-between ${COLOR_CLASSES[color]}`}
+-    >
++    <div className={`border rounded-lg p-2.5 flex flex-col gap-1 ${COLOR_CLASSES[color]}`}>
+       <div className="flex items-center min-w-0">
+         <Icon className={`h-4 w-4 ${ICON_COLOR_CLASSES[color]} mr-1.5 shrink-0`} />
+         <h3 className="text-xs font-medium text-gray-600 dark:text-gray-400 truncate">
+diff --git a/home_energy_manager/frontend/src/hooks/useBatterySocRange.ts b/home_energy_manager/frontend/src/hooks/useBatterySocRange.ts
+index 5f8ac52..9c9b5d9 100644
+--- a/home_energy_manager/frontend/src/hooks/useBatterySocRange.ts
++++ b/home_energy_manager/frontend/src/hooks/useBatterySocRange.ts
+@@ -7,6 +7,7 @@ interface BatterySocRangeResponse {
+   minPercent: number | null;
+   maxPercent: number | null;
+   windowHours: number;
++  targetWindowHours: number;
+   sampleCount: number;
+ }
+ 
+@@ -19,11 +20,18 @@ interface BatterySocRangeResponse {
+  * startup, before the first successful SOC read — not an error, same
+  * distinction PerificReader's `available` flag makes for its own card.
+  * `error` here only ever reflects this hook's own fetch failing.
++ *
++ * `windowHours` is the ACTUAL span currently covered by the in-memory
++ * sample buffer (it resets to ~0 on every add-on restart and grows back
++ * towards `targetWindowHours` over the following days) — never the fixed
++ * target on its own, so the card can be honest when it's still filling up
++ * after a restart instead of claiming a multi-day range it doesn't have.
+  */
+ export function useBatterySocRange() {
+   const [minPercent, setMinPercent] = useState<number | null>(null);
+   const [maxPercent, setMaxPercent] = useState<number | null>(null);
+   const [windowHours, setWindowHours] = useState<number | null>(null);
++  const [targetWindowHours, setTargetWindowHours] = useState<number | null>(null);
+   const [sampleCount, setSampleCount] = useState(0);
+   const [error, setError] = useState<string | null>(null);
+ 
+@@ -33,6 +41,7 @@ export function useBatterySocRange() {
+       setMinPercent(res.data.minPercent);
+       setMaxPercent(res.data.maxPercent);
+       setWindowHours(res.data.windowHours);
++      setTargetWindowHours(res.data.targetWindowHours);
+       setSampleCount(res.data.sampleCount);
+       setError(null);
+     } catch (err) {
+@@ -46,5 +55,5 @@ export function useBatterySocRange() {
+     return () => clearInterval(interval);
+   }, [fetchRange]);
+ 
+-  return { minPercent, maxPercent, windowHours, sampleCount, error };
++  return { minPercent, maxPercent, windowHours, targetWindowHours, sampleCount, error };
+ }
+-- 
+2.43.0
+
