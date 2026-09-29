@@ -1,0 +1,277 @@
+From f6853a5ac65b82279599b9ecc6dd1ef28ff9952f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 29 Sep 2026 12:30:22 +0000
+Subject: [PATCH] Show Kians SOC regardless of ev_scheduler.enabled, add
+ charge-full ETA
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The car's own telemetry reads (SOC, plug, charging-active, estimated
+time-to-full) lived inside _poll_ev_charging's `if not
+ev_settings.enabled: return` early-exit, so they silently stopped
+updating whenever the price/solar charging automation itself was
+switched off — even though they're pure facts read from the car, no
+write consequence, same as _poll_diagnostics's always-on stats. That's
+why Kians SOC wasn't showing on the compact Dashboard tile.
+
+Also exposes kia_uvo's own "Estimated Charge Duration" sensor (already
+accounts for charge-curve tapering near full, not re-derived from
+power/capacity here) as a clock-time ETA on the EV-laddning tile
+("Fulladdad ~HH:MM"), shown whenever the car reports actively charging.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ home_energy_manager/backend/app.py            | 48 ++++++++++++++--
+ .../backend/ev_scheduler_api.py               | 23 ++++++--
+ home_energy_manager/config.yaml               |  2 +-
+ .../src/components/CompactStatusRow.tsx       | 57 ++++++++++++++-----
+ .../src/hooks/useEvSchedulerStatus.ts         |  9 +++
+ 5 files changed, 114 insertions(+), 25 deletions(-)
+
+diff --git a/home_energy_manager/backend/app.py b/home_energy_manager/backend/app.py
+index 2ee8c89..5662f0a 100644
+--- a/home_energy_manager/backend/app.py
++++ b/home_energy_manager/backend/app.py
+@@ -69,6 +69,19 @@ ZAPTEC_CHARGING_SWITCH_ENTITY = "switch.gpn049831_laddar"
+ EV_SOC_ENTITY = "sensor.ev3_ev_battery_level"
+ EV_PLUG_ENTITY = "binary_sensor.ev3_ev_battery_plug"
+ 
++# Added 2026-09-29 for the dashboard's "when will Kian be full" ask.
++# EV_CHARGING_ENTITY is the car's own is-actually-charging flag — distinct
++# from EV_PLUG_ENTITY (plugged in, which can be true while paused/full) and
++# from the ev_scheduler's own chargingAllowed (the app's decision, which can
++# be true while the car itself isn't drawing power, e.g. not plugged in).
++# EV_CHARGE_DURATION_ENTITY is kia_uvo's own "Estimated Charge Duration"
++# (minutes, via the currently connected charger) — the car's own BMS
++# estimate of time-to-target, which already accounts for charge-curve
++# tapering near full and isn't something worth re-deriving from
++# power/capacity here.
++EV_CHARGING_ENTITY = "binary_sensor.ev3_ev_battery_charge"
++EV_CHARGE_DURATION_ENTITY = "sensor.ev3_estimated_charge_duration"
++
+ # Fas 4a: same stopgap as Perific/Zaptec above — no Nibe settings tab yet.
+ # Confirmed live against Håkan's HA instance (2026-09 conversation), device
+ # area "Tvättstuga", nibe_heatpump integration via the LilyGO/ESPHome UDP
+@@ -283,6 +296,12 @@ class BESSController:
+         # just keeps a copy of that same read for the API/dashboard to
+         # show — no new HA read, no change to the scheduling logic itself.
+         self.ev_scheduler_last_ev_soc_percent: float | None = None
++        # Added 2026-09-29, same reasoning as ev_scheduler_last_ev_soc_percent
++        # above: pure car-reported facts for the dashboard's "when will Kian
++        # be full" ask, kept independent of whether the price/solar charging
++        # automation (ev_scheduler.enabled) is itself switched on.
++        self.ev_last_charging_active: bool | None = None
++        self.ev_last_charge_duration_min: float | None = None
+         # Not user-facing — the plug reading from the previous poll tick,
+         # so _poll_ev_charging can pass ev_scheduler.decide() a real
+         # was_plug_connected instead of guessing. See that function's own
+@@ -598,13 +617,18 @@ class BESSController:
+         scheduler is on and says no (charging_allowed False) or doesn't
+         know (None, "no_data" — see SchedulerDecision's own docstring for
+         why that must not fall through to a governor read/write either).
+-        """
+-        ev_settings = self.settings_store.get_section("ev_scheduler")
+-        if not ev_settings.get("enabled", False):
+-            self.ev_scheduler_last_decision = None
+-            self._poll_peak_governor()
+-            return
+ 
++        Fixed 2026-09-29: the car's own telemetry reads (SOC, plug,
++        charging-active, estimated time-to-full) used to sit INSIDE the
++        `enabled` gate below, so they silently stopped updating the moment
++        Håkan switched the price/solar charging automation off — even
++        though they're pure facts read from the car, not scheduler
++        decisions, and have no write consequence. That's what made Kians
++        SOC (and everything else here) go blank/stale on the dashboard
++        whenever ev_scheduler.enabled was False. They now always run,
++        mirroring _poll_diagnostics's "never gates on a settings.enabled
++        flag" contract for its own two always-on stats.
++        """
+         ev_soc_raw = self._read_raw_entity_state(EV_SOC_ENTITY)
+         ev_soc_percent = self._to_float(ev_soc_raw)
+         self.ev_scheduler_last_ev_soc_percent = ev_soc_percent
+@@ -612,6 +636,18 @@ class BESSController:
+         plug_raw = self._read_raw_entity_state(EV_PLUG_ENTITY)
+         plug_connected = None if plug_raw is None else plug_raw == "on"
+ 
++        charging_raw = self._read_raw_entity_state(EV_CHARGING_ENTITY)
++        self.ev_last_charging_active = None if charging_raw is None else charging_raw == "on"
++
++        duration_raw = self._read_raw_entity_state(EV_CHARGE_DURATION_ENTITY)
++        self.ev_last_charge_duration_min = self._to_float(duration_raw)
++
++        ev_settings = self.settings_store.get_section("ev_scheduler")
++        if not ev_settings.get("enabled", False):
++            self.ev_scheduler_last_decision = None
++            self._poll_peak_governor()
++            return
++
+         discharge_power_w = self.ha_controller.get_battery_discharge_power()
+         battery_discharging = (
+             None if discharge_power_w is None else discharge_power_w > 0
+diff --git a/home_energy_manager/backend/ev_scheduler_api.py b/home_energy_manager/backend/ev_scheduler_api.py
+index 85b0240..da3db67 100644
+--- a/home_energy_manager/backend/ev_scheduler_api.py
++++ b/home_energy_manager/backend/ev_scheduler_api.py
+@@ -45,6 +45,15 @@ def _status_payload(bess_controller: Any) -> dict:
+         "status": decision.status if decision is not None else None,
+         "chargingAllowed": decision.charging_allowed if decision is not None else None,
+         "reason": decision.reason if decision is not None else None,
++        # Added 2026-09-29: the car's own ground truth, independent of
++        # `enabled`/`status`/`chargingAllowed` above (which are all about
++        # whether THIS APP is gating charging) — see app.py's
++        # _poll_ev_charging for why these three are read every tick
++        # regardless of the ev_scheduler feature toggle.
++        "chargingActive": getattr(bess_controller, "ev_last_charging_active", None),
++        "estimatedChargeDurationMin": getattr(
++            bess_controller, "ev_last_charge_duration_min", None
++        ),
+     }
+ 
+ 
+@@ -53,10 +62,16 @@ async def get_ev_scheduler_status() -> dict:
+     """Return the EV scheduler's current settings and last decision.
+ 
+     ``status``/``chargingAllowed``/``reason`` are null whenever the
+-    scheduler is disabled (the 30s poll no-ops entirely and clears the
+-    last decision — see app.py's _poll_ev_charging) or hasn't ticked yet
+-    since startup. That's a normal state, not an error — same as
+-    governor_api.py's equivalent fields.
++    scheduler is disabled (the price/solar charging automation itself,
++    not just this endpoint) or hasn't ticked yet since startup. That's a
++    normal state, not an error — same as governor_api.py's equivalent
++    fields.
++
++    ``evSocPercent``/``chargingActive``/``estimatedChargeDurationMin`` are
++    different: they're the car's own reported facts, read every 30s tick
++    regardless of whether the scheduler feature is enabled (see app.py's
++    _poll_ev_charging) — only null before the very first tick since
++    startup, or if the car itself hasn't reported that field.
+     """
+     from app import bess_controller
+ 
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 40d247b..145beb3 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.13"
++version: "0.1.14"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/frontend/src/components/CompactStatusRow.tsx b/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
+index 57f35c1..e19fe4a 100644
+--- a/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
++++ b/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
+@@ -55,6 +55,24 @@ const EV_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' | 'pu
+   allowed_low_price: 'green',
+ };
+ 
++// Added 2026-09-29 for Håkan's "när beräknas batteriet nå 100%" ask.
++// Kia UVO's own "Estimated Charge Duration" (minutes, via whatever charger
++// is currently connected) already accounts for charge-curve tapering near
++// full — turned into a clock-time ETA here rather than re-derived from
++// power/capacity, which would be a worse estimate than the car's own BMS.
++// Only shown while the car itself reports actively charging; a stale
++// duration figure while charging is paused/finished would be misleading.
++function formatChargeEta(
++  chargingActive: boolean | null,
++  durationMin: number | null
++): string | undefined {
++  if (!chargingActive || durationMin === null) return undefined;
++  const eta = new Date(Date.now() + durationMin * 60_000);
++  const hh = eta.getHours().toString().padStart(2, '0');
++  const mm = eta.getMinutes().toString().padStart(2, '0');
++  return `Fulladdad ~${hh}:${mm}`;
++}
++
+ export default function CompactStatusRow() {
+   const perific = usePerificPower();
+   const governor = useGovernorStatus();
+@@ -83,26 +101,37 @@ export default function CompactStatusRow() {
+       ? `Topp: ${governor.recentPeakKw.toFixed(1)} kW`
+       : undefined;
+ 
+-  // EV-laddning — headline SOC nu, subline SOC-tak.
++  // EV-laddning — headline Kians nuvarande SOC (alltid när bilen rapporterar
++  // den, oavsett om pris-/sol-schemaläggningen är påslagen — fixat
++  // 2026-09-29: det är bilens egna rapporterade fakta, inte ett
++  // schemaläggarbeslut, se app.py:s _poll_ev_charging). Sublinjen visar en
++  // "Fulladdad ~HH:MM"-uppskattning medan bilen faktiskt laddar, annars
++  // schemaläggarens status/SOC-tak när den är påslagen.
+   const evEnabled = ev.enabled;
+   const evStatus = ev.status === 'allowed_below_cap'
+     ? (ev.chargingAllowed ? 'Laddar (billigt)' : 'Väntar')
+     : ev.status !== null
+       ? (EV_STATUS_LABELS[ev.status] ?? ev.status)
+       : 'Väntar…';
+-  const evColor: 'blue' | 'green' | 'yellow' | 'red' | 'purple' = !evEnabled
+-    ? 'blue'
+-    : ev.status === 'allowed_below_cap'
+-      ? (ev.chargingAllowed ? 'green' : 'blue')
+-      : ev.status !== null
+-        ? (EV_STATUS_COLORS[ev.status] ?? 'blue')
+-        : 'blue';
+-  const evValue = evEnabled && ev.evSocPercent !== null ? `${ev.evSocPercent.toFixed(0)}%` : evStatus;
+-  const evStatusLine = evEnabled
+-    ? ev.socCapPercent !== null
+-      ? `Tak: ${ev.socCapPercent.toFixed(0)}%`
+-      : evStatus
+-    : undefined;
++  const evColor: 'blue' | 'green' | 'yellow' | 'red' | 'purple' = ev.chargingActive
++    ? 'green'
++    : !evEnabled
++      ? 'blue'
++      : ev.status === 'allowed_below_cap'
++        ? (ev.chargingAllowed ? 'green' : 'blue')
++        : ev.status !== null
++          ? (EV_STATUS_COLORS[ev.status] ?? 'blue')
++          : 'blue';
++  const evValue =
++    ev.evSocPercent !== null ? `${ev.evSocPercent.toFixed(0)}%` : evEnabled ? evStatus : '—';
++  const evEtaLabel = formatChargeEta(ev.chargingActive, ev.estimatedChargeDurationMin);
++  const evStatusLine =
++    evEtaLabel ??
++    (evEnabled
++      ? ev.socCapPercent !== null
++        ? `Tak: ${ev.socCapPercent.toFixed(0)}%`
++        : evStatus
++      : undefined);
+ 
+   // Nibe — headline uppskattad besparing idag (kr), subline
+   // rumsuppvärmningsstatus. Full breakdown (formel, historik) lives on
+diff --git a/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts b/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts
+index 592086e..f68d99d 100644
+--- a/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts
++++ b/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts
+@@ -22,6 +22,13 @@ export interface EvSchedulerStatusResponse {
+     | null;
+   chargingAllowed: boolean | null;
+   reason: string | null;
++  /** The car's own ground truth, independent of enabled/status/
++   * chargingAllowed above (whether the car is ACTUALLY drawing power right
++   * now, vs. whether this app is gating it) — see ev_scheduler_api.py. */
++  chargingActive: boolean | null;
++  /** Kia UVO's own "time to full" estimate (minutes), via whatever charger
++   * is currently connected — null when not charging or not yet reported. */
++  estimatedChargeDurationMin: number | null;
+ }
+ 
+ /**
+@@ -43,6 +50,8 @@ export function useEvSchedulerStatus() {
+     status: null,
+     chargingAllowed: null,
+     reason: null,
++    chargingActive: null,
++    estimatedChargeDurationMin: null,
+   });
+   const [error, setError] = useState<string | null>(null);
+   const [requestingOverride, setRequestingOverride] = useState(false);
+-- 
+2.43.0
+
