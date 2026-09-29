@@ -1,14 +1,23 @@
 import React from 'react';
 
-// Dashboard-compaction phase (2026-09-28): a small square status tile,
-// sitting alongside StatusCard (SystemStatusCard.tsx) rather than replacing
-// it — see claude/dashboard-compaction-and-nibe-savings-forslag.md's "Del 1"
-// for the competitive-research writeup behind this shape. No single
-// community HA card had a reusable "four square tiles in a row" component
-// to copy; this synthesizes solar-bar-card's small icon+number "stat tile"
-// pattern with the classic app-grid convention (icon, one headline number,
-// a short status line) that Håkan asked for explicitly ("kvadratiska...
-// bredvid varandra").
+// Dashboard-compaction phase (2026-09-28): a small status tile, sitting
+// alongside StatusCard (SystemStatusCard.tsx) rather than replacing it —
+// see claude/dashboard-compaction-and-nibe-savings-forslag.md's "Del 1" for
+// the competitive-research writeup behind this shape. No single community
+// HA card had a reusable "four square tiles in a row" component to copy;
+// this synthesizes solar-bar-card's small icon+number "stat tile" pattern
+// with the classic app-grid convention (icon, one headline number, a short
+// status line) that Håkan asked for explicitly ("kvadratiska... bredvid
+// varandra").
+//
+// Fixed 2026-09-29: the first version used `aspect-square` to get that
+// squareness, but on the row's wide `sm:grid-cols-4` columns a square sized
+// to the COLUMN WIDTH is very tall — the opposite of compact, and exactly
+// what Håkan's screenshot showed ("Rutorna kan bli mycket kompaktare").
+// Height now simply follows the content (header row + one value + one
+// status line), which is what "compact" actually means here; the tiles end
+// up wider than they are tall rather than perfectly square, which is the
+// right trade-off against Håkan's explicit follow-up feedback.
 //
 // Deliberately a MUCH smaller sibling of StatusCard, not a variant/prop on
 // it: a compact tile shows exactly one headline value and one status line,
@@ -62,9 +71,7 @@ export default function CompactStatusCard({
   annotation,
 }: CompactStatusCardProps) {
   return (
-    <div
-      className={`border rounded-lg p-3 aspect-square flex flex-col justify-between ${COLOR_CLASSES[color]}`}
-    >
+    <div className={`border rounded-lg p-2.5 flex flex-col gap-1 ${COLOR_CLASSES[color]}`}>
       <div className="flex items-center min-w-0">
         <Icon className={`h-4 w-4 ${ICON_COLOR_CLASSES[color]} mr-1.5 shrink-0`} />
         <h3 className="text-xs font-medium text-gray-600 dark:text-gray-400 truncate">
