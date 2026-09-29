@@ -55,6 +55,24 @@ const EV_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' | 'pu
   allowed_low_price: 'green',
 };
 
+// Added 2026-09-29 for Håkan's "när beräknas batteriet nå 100%" ask.
+// Kia UVO's own "Estimated Charge Duration" (minutes, via whatever charger
+// is currently connected) already accounts for charge-curve tapering near
+// full — turned into a clock-time ETA here rather than re-derived from
+// power/capacity, which would be a worse estimate than the car's own BMS.
+// Only shown while the car itself reports actively charging; a stale
+// duration figure while charging is paused/finished would be misleading.
+function formatChargeEta(
+  chargingActive: boolean | null,
+  durationMin: number | null
+): string | undefined {
+  if (!chargingActive || durationMin === null) return undefined;
+  const eta = new Date(Date.now() + durationMin * 60_000);
+  const hh = eta.getHours().toString().padStart(2, '0');
+  const mm = eta.getMinutes().toString().padStart(2, '0');
+  return `Fulladdad ~${hh}:${mm}`;
+}
+
 export default function CompactStatusRow() {
   const perific = usePerificPower();
   const governor = useGovernorStatus();
@@ -83,26 +101,37 @@ export default function CompactStatusRow() {
       ? `Topp: ${governor.recentPeakKw.toFixed(1)} kW`
       : undefined;
 
-  // EV-laddning — headline SOC nu, subline SOC-tak.
+  // EV-laddning — headline Kians nuvarande SOC (alltid när bilen rapporterar
+  // den, oavsett om pris-/sol-schemaläggningen är påslagen — fixat
+  // 2026-09-29: det är bilens egna rapporterade fakta, inte ett
+  // schemaläggarbeslut, se app.py:s _poll_ev_charging). Sublinjen visar en
+  // "Fulladdad ~HH:MM"-uppskattning medan bilen faktiskt laddar, annars
+  // schemaläggarens status/SOC-tak när den är påslagen.
   const evEnabled = ev.enabled;
   const evStatus = ev.status === 'allowed_below_cap'
     ? (ev.chargingAllowed ? 'Laddar (billigt)' : 'Väntar')
     : ev.status !== null
       ? (EV_STATUS_LABELS[ev.status] ?? ev.status)
       : 'Väntar…';
-  const evColor: 'blue' | 'green' | 'yellow' | 'red' | 'purple' = !evEnabled
-    ? 'blue'
-    : ev.status === 'allowed_below_cap'
-      ? (ev.chargingAllowed ? 'green' : 'blue')
-      : ev.status !== null
-        ? (EV_STATUS_COLORS[ev.status] ?? 'blue')
-        : 'blue';
-  const evValue = evEnabled && ev.evSocPercent !== null ? `${ev.evSocPercent.toFixed(0)}%` : evStatus;
-  const evStatusLine = evEnabled
-    ? ev.socCapPercent !== null
-      ? `Tak: ${ev.socCapPercent.toFixed(0)}%`
-      : evStatus
-    : undefined;
+  const evColor: 'blue' | 'green' | 'yellow' | 'red' | 'purple' = ev.chargingActive
+    ? 'green'
+    : !evEnabled
+      ? 'blue'
+      : ev.status === 'allowed_below_cap'
+        ? (ev.chargingAllowed ? 'green' : 'blue')
+        : ev.status !== null
+          ? (EV_STATUS_COLORS[ev.status] ?? 'blue')
+          : 'blue';
+  const evValue =
+    ev.evSocPercent !== null ? `${ev.evSocPercent.toFixed(0)}%` : evEnabled ? evStatus : '—';
+  const evEtaLabel = formatChargeEta(ev.chargingActive, ev.estimatedChargeDurationMin);
+  const evStatusLine =
+    evEtaLabel ??
+    (evEnabled
+      ? ev.socCapPercent !== null
+        ? `Tak: ${ev.socCapPercent.toFixed(0)}%`
+        : evStatus
+      : undefined);
 
   // Nibe — headline uppskattad besparing idag (kr), subline
   // rumsuppvärmningsstatus. Full breakdown (formel, historik) lives on

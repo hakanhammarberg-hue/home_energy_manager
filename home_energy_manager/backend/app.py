@@ -69,6 +69,19 @@ ZAPTEC_CHARGING_SWITCH_ENTITY = "switch.gpn049831_laddar"
 EV_SOC_ENTITY = "sensor.ev3_ev_battery_level"
 EV_PLUG_ENTITY = "binary_sensor.ev3_ev_battery_plug"
 
+# Added 2026-09-29 for the dashboard's "when will Kian be full" ask.
+# EV_CHARGING_ENTITY is the car's own is-actually-charging flag — distinct
+# from EV_PLUG_ENTITY (plugged in, which can be true while paused/full) and
+# from the ev_scheduler's own chargingAllowed (the app's decision, which can
+# be true while the car itself isn't drawing power, e.g. not plugged in).
+# EV_CHARGE_DURATION_ENTITY is kia_uvo's own "Estimated Charge Duration"
+# (minutes, via the currently connected charger) — the car's own BMS
+# estimate of time-to-target, which already accounts for charge-curve
+# tapering near full and isn't something worth re-deriving from
+# power/capacity here.
+EV_CHARGING_ENTITY = "binary_sensor.ev3_ev_battery_charge"
+EV_CHARGE_DURATION_ENTITY = "sensor.ev3_estimated_charge_duration"
+
 # Fas 4a: same stopgap as Perific/Zaptec above — no Nibe settings tab yet.
 # Confirmed live against Håkan's HA instance (2026-09 conversation), device
 # area "Tvättstuga", nibe_heatpump integration via the LilyGO/ESPHome UDP
@@ -283,6 +296,12 @@ class BESSController:
         # just keeps a copy of that same read for the API/dashboard to
         # show — no new HA read, no change to the scheduling logic itself.
         self.ev_scheduler_last_ev_soc_percent: float | None = None
+        # Added 2026-09-29, same reasoning as ev_scheduler_last_ev_soc_percent
+        # above: pure car-reported facts for the dashboard's "when will Kian
+        # be full" ask, kept independent of whether the price/solar charging
+        # automation (ev_scheduler.enabled) is itself switched on.
+        self.ev_last_charging_active: bool | None = None
+        self.ev_last_charge_duration_min: float | None = None
         # Not user-facing — the plug reading from the previous poll tick,
         # so _poll_ev_charging can pass ev_scheduler.decide() a real
         # was_plug_connected instead of guessing. See that function's own
@@ -598,19 +617,36 @@ class BESSController:
         scheduler is on and says no (charging_allowed False) or doesn't
         know (None, "no_data" — see SchedulerDecision's own docstring for
         why that must not fall through to a governor read/write either).
-        """
-        ev_settings = self.settings_store.get_section("ev_scheduler")
-        if not ev_settings.get("enabled", False):
-            self.ev_scheduler_last_decision = None
-            self._poll_peak_governor()
-            return
 
+        Fixed 2026-09-29: the car's own telemetry reads (SOC, plug,
+        charging-active, estimated time-to-full) used to sit INSIDE the
+        `enabled` gate below, so they silently stopped updating the moment
+        Håkan switched the price/solar charging automation off — even
+        though they're pure facts read from the car, not scheduler
+        decisions, and have no write consequence. That's what made Kians
+        SOC (and everything else here) go blank/stale on the dashboard
+        whenever ev_scheduler.enabled was False. They now always run,
+        mirroring _poll_diagnostics's "never gates on a settings.enabled
+        flag" contract for its own two always-on stats.
+        """
         ev_soc_raw = self._read_raw_entity_state(EV_SOC_ENTITY)
         ev_soc_percent = self._to_float(ev_soc_raw)
         self.ev_scheduler_last_ev_soc_percent = ev_soc_percent
 
         plug_raw = self._read_raw_entity_state(EV_PLUG_ENTITY)
         plug_connected = None if plug_raw is None else plug_raw == "on"
+
+        charging_raw = self._read_raw_entity_state(EV_CHARGING_ENTITY)
+        self.ev_last_charging_active = None if charging_raw is None else charging_raw == "on"
+
+        duration_raw = self._read_raw_entity_state(EV_CHARGE_DURATION_ENTITY)
+        self.ev_last_charge_duration_min = self._to_float(duration_raw)
+
+        ev_settings = self.settings_store.get_section("ev_scheduler")
+        if not ev_settings.get("enabled", False):
+            self.ev_scheduler_last_decision = None
+            self._poll_peak_governor()
+            return
 
         discharge_power_w = self.ha_controller.get_battery_discharge_power()
         battery_discharging = (

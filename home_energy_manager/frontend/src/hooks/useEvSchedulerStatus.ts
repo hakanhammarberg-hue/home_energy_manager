@@ -22,6 +22,13 @@ export interface EvSchedulerStatusResponse {
     | null;
   chargingAllowed: boolean | null;
   reason: string | null;
+  /** The car's own ground truth, independent of enabled/status/
+   * chargingAllowed above (whether the car is ACTUALLY drawing power right
+   * now, vs. whether this app is gating it) — see ev_scheduler_api.py. */
+  chargingActive: boolean | null;
+  /** Kia UVO's own "time to full" estimate (minutes), via whatever charger
+   * is currently connected — null when not charging or not yet reported. */
+  estimatedChargeDurationMin: number | null;
 }
 
 /**
@@ -43,6 +50,8 @@ export function useEvSchedulerStatus() {
     status: null,
     chargingAllowed: null,
     reason: null,
+    chargingActive: null,
+    estimatedChargeDurationMin: null,
   });
   const [error, setError] = useState<string | null>(null);
   const [requestingOverride, setRequestingOverride] = useState(false);

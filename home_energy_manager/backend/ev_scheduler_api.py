@@ -45,6 +45,15 @@ def _status_payload(bess_controller: Any) -> dict:
         "status": decision.status if decision is not None else None,
         "chargingAllowed": decision.charging_allowed if decision is not None else None,
         "reason": decision.reason if decision is not None else None,
+        # Added 2026-09-29: the car's own ground truth, independent of
+        # `enabled`/`status`/`chargingAllowed` above (which are all about
+        # whether THIS APP is gating charging) — see app.py's
+        # _poll_ev_charging for why these three are read every tick
+        # regardless of the ev_scheduler feature toggle.
+        "chargingActive": getattr(bess_controller, "ev_last_charging_active", None),
+        "estimatedChargeDurationMin": getattr(
+            bess_controller, "ev_last_charge_duration_min", None
+        ),
     }
 
 
@@ -53,10 +62,16 @@ async def get_ev_scheduler_status() -> dict:
     """Return the EV scheduler's current settings and last decision.
 
     ``status``/``chargingAllowed``/``reason`` are null whenever the
-    scheduler is disabled (the 30s poll no-ops entirely and clears the
-    last decision — see app.py's _poll_ev_charging) or hasn't ticked yet
-    since startup. That's a normal state, not an error — same as
-    governor_api.py's equivalent fields.
+    scheduler is disabled (the price/solar charging automation itself,
+    not just this endpoint) or hasn't ticked yet since startup. That's a
+    normal state, not an error — same as governor_api.py's equivalent
+    fields.
+
+    ``evSocPercent``/``chargingActive``/``estimatedChargeDurationMin`` are
+    different: they're the car's own reported facts, read every 30s tick
+    regardless of whether the scheduler feature is enabled (see app.py's
+    _poll_ev_charging) — only null before the very first tick since
+    startup, or if the car itself hasn't reported that field.
     """
     from app import bess_controller
 
