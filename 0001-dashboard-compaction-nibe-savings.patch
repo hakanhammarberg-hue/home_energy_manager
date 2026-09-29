@@ -1,0 +1,1148 @@
+From 379d2b5b55aecf4fc7965c00d4ba1829e6bd8806 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 28 Sep 2026 21:42:57 +0000
+Subject: [PATCH] Dashboard compaction: compact status row + Nibe cost-savings
+ estimate
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Compresses the Dashboard per Håkan's request: Perific One, Effektvakt,
+EV-laddning and Nibe now sit side by side as small square status tiles
+(CompactStatusRow/CompactStatusCard) instead of four full-width sections.
+Nibe's detailed status card and history charts are retired from the
+Dashboard entirely (NibeStatusCard removed) — full Nibe detail now lives
+only on the /nibe page, which gained the "Lyxläge varmvatten" toggle
+(NibeControls) that used to live on the removed card.
+
+Adds a first cost-savings estimate for Nibe's active price-peak reduction
+lever (decision.py's "reduced_expensive_price"), mirroring the Growatt
+battery's Cost & Savings card in spirit but honestly scoped to what's
+actually computable without a thermal/COP model: a degree-hour proxy
+(core/nibe/savings.py) applied only to the one lever that genuinely reduces
+consumption, using today's actually-applied heat-offset history and
+already-cached spot prices. Surfaced as a compact "kr idag" figure on the
+Dashboard tile and a full breakdown (NibeSavingsCard) with the model's own
+assumptions spelled out on the Nibe page.
+
+Backed by competitive research into other HA/inverter dashboards' compact-
+tile patterns and prior art for heat-pump savings calculations (see
+claude/dashboard-compaction-and-nibe-savings-forslag.md).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ home_energy_manager/backend/nibe_api.py       | 115 ++++++++++++
+ home_energy_manager/config.yaml               |   2 +-
+ home_energy_manager/core/nibe/savings.py      | 168 ++++++++++++++++++
+ .../core/nibe/tests/test_savings.py           |  87 +++++++++
+ .../src/components/CompactStatusCard.tsx      |  92 ++++++++++
+ .../src/components/CompactStatusRow.tsx       | 159 +++++++++++++++++
+ .../frontend/src/components/NibeControls.tsx  |  52 ++++++
+ .../src/components/NibeSavingsCard.tsx        |  50 ++++++
+ .../src/components/NibeStatusCard.tsx         |  90 ----------
+ .../frontend/src/hooks/useNibeSavings.ts      |  63 +++++++
+ .../frontend/src/pages/DashboardPage.tsx      |  45 ++---
+ .../frontend/src/pages/NibeDriftPage.tsx      |  37 +++-
+ 12 files changed, 827 insertions(+), 133 deletions(-)
+ create mode 100644 home_energy_manager/core/nibe/savings.py
+ create mode 100644 home_energy_manager/core/nibe/tests/test_savings.py
+ create mode 100644 home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+ create mode 100644 home_energy_manager/frontend/src/components/CompactStatusRow.tsx
+ create mode 100644 home_energy_manager/frontend/src/components/NibeControls.tsx
+ create mode 100644 home_energy_manager/frontend/src/components/NibeSavingsCard.tsx
+ delete mode 100644 home_energy_manager/frontend/src/components/NibeStatusCard.tsx
+ create mode 100644 home_energy_manager/frontend/src/hooks/useNibeSavings.ts
+
+diff --git a/home_energy_manager/backend/nibe_api.py b/home_energy_manager/backend/nibe_api.py
+index 5c4d0b5..9772a2d 100644
+--- a/home_energy_manager/backend/nibe_api.py
++++ b/home_energy_manager/backend/nibe_api.py
+@@ -18,6 +18,15 @@ Home Assistant directly, so they do — see core/nibe/history.py's and
+ core/nibe/live.py's own docstrings for the full reasoning and why that I/O
+ lives in its own core module rather than here.
+ 
++GET /api/nibe/savings (2026-09-28, dashboard compaction phase) is a third
++such exception, for the same reason as /history: estimating today's
++price-peak-reduction savings needs today's actually-applied heat_offset_s1
++history from Home Assistant, so it reaches in directly. The calculation
++itself is pure (core/nibe/savings.py) — this endpoint's only job is to
++assemble that module's inputs from history.py's HA read plus
++price_manager's already-cached today's prices, see that endpoint's own
++docstring below for the full reasoning.
++
+ POST /api/nibe/dhw-luxury is the one write this router does, and mirrors
+ POST /api/ev-scheduler/override in spirit: a narrow, dashboard-reachable
+ toggle, separate from the general PATCH /api/settings mechanism the
+@@ -33,6 +42,7 @@ from typing import Any
+ from fastapi import APIRouter, HTTPException
+ from loguru import logger
+ 
++from core.bess import time_utils
+ from core.nibe.history import (
+     CLIMATE_ENTITY,
+     CLIMATE_TARGET_KEY,
+@@ -46,6 +56,7 @@ from core.nibe.history import (
+     fetch_history_series,
+ )
+ from core.nibe.live import fetch_live_snapshot
++from core.nibe.savings import estimate_reduction_savings
+ 
+ router = APIRouter()
+ 
+@@ -181,6 +192,110 @@ async def get_nibe_live() -> dict:
+     return payload
+ 
+ 
++@router.get("/api/nibe/savings")
++async def get_nibe_savings() -> dict:
++    """Today-so-far estimated savings from the price-peak reduction lever
++    (core/nibe/decision.py's FIFTH LEVER, "reduced_expensive_price") — see
++    core/nibe/savings.py's module docstring for the full methodology and
++    why it's scoped to today only and to this one lever.
++
++    Assembles two independent things onto the same hourly grid:
++      1. The actually-applied number.heat_offset_s1 register value for each
++         hour since local midnight, via history.py's existing HA-recorder
++         read (same source /api/nibe/history already uses).
++      2. That hour's spot price, averaged from today's already-cached
++         quarter-hourly buy-price array (core.bess.price_manager) — the
++         same array _poll_nibe reads every cycle, so this costs no extra
++         Nordpool/price-source call.
++
++    Scoped to TODAY ONLY (not a rolling 24h/48h window like /history):
++    price_manager only ever holds the CURRENT day's full price array —
++    there is no retained "yesterday's prices" to align against a rolling
++    window that crosses midnight, so extending this past today would mean
++    silently pairing some hours with the wrong day's price. Today-so-far is
++    the honest boundary of what's actually computable right now (see the
++    design doc's Del 2 for the 2-day-window future-work note).
++
++    Returns a zeroed estimate (not an error) whenever Home Assistant's
++    history endpoint or the price source has nothing yet — same
++    None/empty-tolerant convention as /api/nibe/history and
++    /api/nibe/status.
++    """
++    from app import bess_controller
++
++    controller = bess_controller.nibe_controller
++    tz = time_utils.TIMEZONE
++    now_local = datetime.now(tz)
++    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
++    hours_elapsed = max(1, int((now_local - midnight_local).total_seconds() // 3600) + 1)
++
++    empty_response = {
++        "hours": [],
++        "totalAvoidedKwh": 0.0,
++        "totalSavingsKr": 0.0,
++        "activeHours": 0,
++        "heatLossCoefficientKwPerC": None,
++        "assumedCop": None,
++    }
++
++    # Same "one extra lookback hour, then drop it" padding /api/nibe/history
++    # uses — build_hourly_series has no baseline for its very first bucket
++    # otherwise (see that function's own docstring).
++    series = fetch_history_series(
++        controller.base_url, controller.headers, hours_elapsed + 1, [HEAT_OFFSET_ENTITY]
++    )
++    if not series or not series.get(HEAT_OFFSET_ENTITY):
++        return empty_response
++
++    end_utc = now_local.astimezone(UTC)
++    start_utc = midnight_local.astimezone(UTC)
++    rows = build_hourly_series(series, start_utc - timedelta(hours=1), end_utc)[1:]
++    if not rows:
++        return empty_response
++
++    try:
++        today_prices_ore = [
++            p * 100 for p in bess_controller.system.price_manager.get_buy_prices()
++        ]
++    except Exception as e:
++        logger.debug("Could not read today's prices for Nibe savings estimate: %s", e)
++        today_prices_ore = []
++
++    periods_per_hour = time_utils.PERIODS_PER_HOUR
++    hourly_inputs: list[tuple[str, float | None, float | None]] = []
++    for row in rows:
++        bucket_end_local = datetime.fromisoformat(row["timestamp"]).astimezone(tz)
++        # build_hourly_series timestamps a bucket by its END — the hour of
++        # day this bucket actually COVERS is one hour earlier.
++        hour_of_day = (bucket_end_local.hour - 1) % 24
++        start_period = hour_of_day * periods_per_hour
++        end_period = start_period + periods_per_hour
++        quarter_prices = today_prices_ore[start_period:end_period]
++        price_ore = sum(quarter_prices) / len(quarter_prices) if quarter_prices else None
++        hourly_inputs.append((row["timestamp"], row.get(HEAT_OFFSET_ENTITY), price_ore))
++
++    estimate = estimate_reduction_savings(hourly_inputs)
++
++    return {
++        "hours": [
++            {
++                "timestamp": hour.timestamp,
++                "offsetC": hour.offset_c,
++                "priceOrePerKwh": hour.price_ore_per_kwh,
++                "active": hour.active,
++                "avoidedKwh": hour.avoided_kwh,
++                "savingsKr": hour.savings_kr,
++            }
++            for hour in estimate.hours
++        ],
++        "totalAvoidedKwh": estimate.total_avoided_kwh,
++        "totalSavingsKr": estimate.total_savings_kr,
++        "activeHours": estimate.active_hours,
++        "heatLossCoefficientKwPerC": estimate.heat_loss_coefficient_kw_per_c,
++        "assumedCop": estimate.assumed_cop,
++    }
++
++
+ @router.post("/api/nibe/dhw-luxury")
+ async def set_dhw_luxury_enabled(body: dict) -> dict:
+     """Flip the Lyxläge varmvatten dashboard switch.
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index e3d24cb..436a855 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.11"
++version: "0.1.12"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/core/nibe/savings.py b/home_energy_manager/core/nibe/savings.py
+new file mode 100644
+index 0000000..4859f9b
+--- /dev/null
++++ b/home_energy_manager/core/nibe/savings.py
+@@ -0,0 +1,168 @@
++"""core.nibe.savings — a pure, honestly-scoped estimate of today's cost
++savings from the space-heating lever's active price-peak reduction
++("reduced_expensive_price", core/nibe/decision.py's FIFTH LEVER,
++DEFAULT_HEAT_OFFSET_REDUCTION_C = -2).
++
++WHY THIS EXISTS (2026-09-28): Håkan asked for a Nibe cost-savings figure on
++the dashboard "likt growatt har för sitt batteri" (like Growatt has for its
++battery). The battery's own Cost & Savings card (SystemStatusCard.tsx) can
++do this exactly, because core.bess.dp_battery_algorithm computes a genuine
++grid-only-vs-optimized kWh comparison. Nibe has no equivalent: no delivered-
++heat/COP sensor, no thermal model of the house. See
++claude/dashboard-compaction-and-nibe-savings-forslag.md for the full
++competitive-research writeup behind the approach below — summarized here:
++
++- Home Assistant's own proposed native heat-pump Energy Dashboard support
++  (github.com/orgs/home-assistant/discussions/2917) uses COP =
++  delivered_heat_kWh / electricity_kWh, which needs a delivered-heat sensor
++  Håkan's F750 setup doesn't expose. Not usable here.
++- No Nibe smart-control project found (tengmo-ab/smart-heat-control,
++  Samot89's NIBE blueprint) computes a savings figure at all.
++- The established methodology for estimating heat-pump/thermostat setback
++  savings WITHOUT a full thermal model is a degree-hour proxy (see DIY Smart
++  Home Hub's "Smart Thermostat Setback Savings Calculator"): avoided energy
++  ~= |offset| x hours x a heat-loss-per-degree constant, converted through
++  an assumed COP. That is exactly what this module does, scoped to the ONE
++  lever that genuinely reduces net consumption.
++
++DELIBERATELY EXCLUDED: the three boost branches (engaged_solar_surplus,
++engaged_cheap_price, engaged_price_spike_ahead) spend MORE energy at boost
++time to bank comfort for later — they shift consumption in time rather than
++reduce it. Counting them as "savings" here would overclaim, so this module
++only ever looks at hours where the applied offset was negative (the
++reduction lever, and only that lever ever asks for less heat than neutral).
++
++THIS IS A MODEL, NOT A MEASUREMENT. HEAT_LOSS_COEFFICIENT_KW_PER_C and
++ASSUMED_COP are first guesses for a normally-insulated villa/F750, not
++measured for this installation — every caller of estimate_reduction_savings
++must label the result "uppskattad" (estimated) wherever it's shown, same as
++Håkan asked for ("likt growatt", which itself always shows Today's Savings
++as a plain figure — but Nibe's figure has no equivalent ground truth to
++verify against, hence the explicit estimate framing here instead).
++
++Pure function, no HA, no I/O — same testable-without-a-live-pump shape as
++decision.py/history.py's own split of I/O (backend/nibe_api.py,
++core/nibe/history.py's fetch_history_series) from calculation (here).
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++# A first guess for how many kW of space-heating demand a 1 degC curve-offset
++# change represents for a normally-insulated Swedish villa this size — NOT
++# measured for Håkan's house. Revisit once the calibration comparison (see
++# module docstring) has accumulated enough hours to say whether this over-
++# or under-estimates the real effect.
++DEFAULT_HEAT_LOSS_COEFFICIENT_KW_PER_C = 0.35
++
++# F750 nominal COP at a typical Swedish winter operating point — a first
++# guess, not measured for this installation (no delivered-heat sensor to
++# calibrate against directly; see module docstring).
++DEFAULT_ASSUMED_COP = 3.0
++
++
++@dataclass(frozen=True)
++class HourlySavingsRow:
++    """One hour's contribution to the estimate.
++
++    active: True iff this hour's actually-applied heat_offset_s1 register
++        value was negative — i.e. the FIFTH LEVER's price-peak reduction was
++        in effect (the only lever that ever asks for less heat than
++        neutral). Inferred from the real applied register value (same
++        source core/nibe/history.py already reads), not from a separate
++        decision log, so a negative offset ever set by any other means would
++        also count here — an accepted limitation, consistent with this
++        package's general "reflect what was actually applied" philosophy.
++    avoided_kwh: the modeled avoided energy this hour, or None if the hour
++        wasn't active (nothing to estimate) or offset_c itself was
++        unavailable.
++    savings_kr: avoided_kwh valued at this hour's spot price, or None
++        whenever avoided_kwh is None OR this hour's price wasn't available
++        (a missing price does not zero out the kWh estimate — see
++        estimate_reduction_savings' totals handling).
++    """
++
++    timestamp: str
++    offset_c: float | None
++    price_ore_per_kwh: float | None
++    active: bool
++    avoided_kwh: float | None
++    savings_kr: float | None
++
++
++@dataclass(frozen=True)
++class SavingsEstimate:
++    hours: list[HourlySavingsRow]
++    total_avoided_kwh: float
++    total_savings_kr: float
++    active_hours: int
++    heat_loss_coefficient_kw_per_c: float
++    assumed_cop: float
++
++
++def estimate_reduction_savings(
++    hourly: list[tuple[str, float | None, float | None]],
++    *,
++    heat_loss_coefficient_kw_per_c: float = DEFAULT_HEAT_LOSS_COEFFICIENT_KW_PER_C,
++    assumed_cop: float = DEFAULT_ASSUMED_COP,
++) -> SavingsEstimate:
++    """Estimate today's price-peak-reduction savings from a caller-assembled
++    per-hour series.
++
++    hourly: list of (timestamp, offset_c, price_ore_per_kwh) tuples, one per
++        hour bucket, in any order (the caller — backend/nibe_api.py — owns
++        aligning offset history with price history; this function does no
++        date/time math itself, same convention as core/nibe/decision.py).
++        offset_c is the actually-applied number.heat_offset_s1 value for
++        that hour (None if unavailable that hour). price_ore_per_kwh is that
++        hour's spot price in öre/kWh (None if unavailable).
++
++    For each hour where offset_c < 0 (active):
++        avoided_kwh = |offset_c| * heat_loss_coefficient_kw_per_c / assumed_cop
++        savings_kr = avoided_kwh * price_ore_per_kwh / 100  (öre -> kr)
++
++    total_avoided_kwh sums every active hour's avoided_kwh regardless of
++    whether that hour's price was available (the kWh estimate doesn't need a
++    price). total_savings_kr only sums hours where BOTH offset and price
++    were available — a missing price for one hour understates the kr total
++    slightly rather than fabricating a price, same "never guess a number
++    that looks measured" stance as the rest of this codebase.
++    """
++    rows: list[HourlySavingsRow] = []
++    total_kwh = 0.0
++    total_kr = 0.0
++    active_hours = 0
++
++    for timestamp, offset_c, price_ore in hourly:
++        active = offset_c is not None and offset_c < 0
++        avoided_kwh: float | None = None
++        savings_kr: float | None = None
++
++        if active:
++            avoided_kwh = abs(offset_c) * heat_loss_coefficient_kw_per_c / assumed_cop
++            total_kwh += avoided_kwh
++            active_hours += 1
++            if price_ore is not None:
++                savings_kr = avoided_kwh * price_ore / 100.0
++                total_kr += savings_kr
++
++        rows.append(
++            HourlySavingsRow(
++                timestamp=timestamp,
++                offset_c=offset_c,
++                price_ore_per_kwh=price_ore,
++                active=active,
++                avoided_kwh=avoided_kwh,
++                savings_kr=savings_kr,
++            )
++        )
++
++    return SavingsEstimate(
++        hours=rows,
++        total_avoided_kwh=total_kwh,
++        total_savings_kr=total_kr,
++        active_hours=active_hours,
++        heat_loss_coefficient_kw_per_c=heat_loss_coefficient_kw_per_c,
++        assumed_cop=assumed_cop,
++    )
+diff --git a/home_energy_manager/core/nibe/tests/test_savings.py b/home_energy_manager/core/nibe/tests/test_savings.py
+new file mode 100644
+index 0000000..b4c0c20
+--- /dev/null
++++ b/home_energy_manager/core/nibe/tests/test_savings.py
+@@ -0,0 +1,87 @@
++"""Unit tests for core.nibe.savings — pure functions, no HA, no mocking
++needed. Run with `pytest` from the repo root, same convention as
++test_decision.py/test_history.py.
++"""
++
++from core.nibe.savings import (
++    DEFAULT_ASSUMED_COP,
++    DEFAULT_HEAT_LOSS_COEFFICIENT_KW_PER_C,
++    estimate_reduction_savings,
++)
++
++
++def test_inactive_hours_contribute_nothing():
++    hourly = [
++        ("2026-09-28T01:00:00+00:00", 0.0, 50.0),
++        ("2026-09-28T02:00:00+00:00", 2.0, 50.0),  # boost lever, not reduction
++        ("2026-09-28T03:00:00+00:00", None, 50.0),  # offset unavailable
++    ]
++    estimate = estimate_reduction_savings(hourly)
++    assert estimate.active_hours == 0
++    assert estimate.total_avoided_kwh == 0.0
++    assert estimate.total_savings_kr == 0.0
++    assert all(not row.active for row in estimate.hours)
++    assert all(row.avoided_kwh is None for row in estimate.hours)
++
++
++def test_active_hour_computes_avoided_kwh_and_savings_kr():
++    hourly = [("2026-09-28T18:00:00+00:00", -2.0, 150.0)]
++    estimate = estimate_reduction_savings(hourly)
++
++    expected_kwh = 2.0 * DEFAULT_HEAT_LOSS_COEFFICIENT_KW_PER_C / DEFAULT_ASSUMED_COP
++    expected_kr = expected_kwh * 150.0 / 100.0
++
++    assert estimate.active_hours == 1
++    row = estimate.hours[0]
++    assert row.active is True
++    assert row.avoided_kwh == expected_kwh
++    assert row.savings_kr == expected_kr
++    assert estimate.total_avoided_kwh == expected_kwh
++    assert estimate.total_savings_kr == expected_kr
++
++
++def test_missing_price_still_counts_kwh_but_not_kr():
++    hourly = [("2026-09-28T18:00:00+00:00", -2.0, None)]
++    estimate = estimate_reduction_savings(hourly)
++
++    assert estimate.active_hours == 1
++    assert estimate.total_avoided_kwh > 0.0
++    assert estimate.total_savings_kr == 0.0
++    assert estimate.hours[0].savings_kr is None
++
++
++def test_multiple_active_hours_sum_correctly():
++    hourly = [
++        ("2026-09-28T17:00:00+00:00", -2.0, 100.0),
++        ("2026-09-28T18:00:00+00:00", -2.0, 200.0),
++        ("2026-09-28T19:00:00+00:00", 0.0, 80.0),
++    ]
++    estimate = estimate_reduction_savings(hourly)
++
++    per_hour_kwh = 2.0 * DEFAULT_HEAT_LOSS_COEFFICIENT_KW_PER_C / DEFAULT_ASSUMED_COP
++    expected_kwh = per_hour_kwh * 2
++    expected_kr = per_hour_kwh * 100.0 / 100.0 + per_hour_kwh * 200.0 / 100.0
++
++    assert estimate.active_hours == 2
++    assert estimate.total_avoided_kwh == expected_kwh
++    assert abs(estimate.total_savings_kr - expected_kr) < 1e-9
++
++
++def test_custom_constants_are_honored_and_returned():
++    hourly = [("2026-09-28T18:00:00+00:00", -3.0, 100.0)]
++    estimate = estimate_reduction_savings(
++        hourly, heat_loss_coefficient_kw_per_c=0.5, assumed_cop=2.5
++    )
++
++    expected_kwh = 3.0 * 0.5 / 2.5
++    assert estimate.total_avoided_kwh == expected_kwh
++    assert estimate.heat_loss_coefficient_kw_per_c == 0.5
++    assert estimate.assumed_cop == 2.5
++
++
++def test_empty_input_returns_zeroed_estimate():
++    estimate = estimate_reduction_savings([])
++    assert estimate.hours == []
++    assert estimate.total_avoided_kwh == 0.0
++    assert estimate.total_savings_kr == 0.0
++    assert estimate.active_hours == 0
+diff --git a/home_energy_manager/frontend/src/components/CompactStatusCard.tsx b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+new file mode 100644
+index 0000000..3c827bb
+--- /dev/null
++++ b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+@@ -0,0 +1,92 @@
++import React from 'react';
++
++// Dashboard-compaction phase (2026-09-28): a small square status tile,
++// sitting alongside StatusCard (SystemStatusCard.tsx) rather than replacing
++// it — see claude/dashboard-compaction-and-nibe-savings-forslag.md's "Del 1"
++// for the competitive-research writeup behind this shape. No single
++// community HA card had a reusable "four square tiles in a row" component
++// to copy; this synthesizes solar-bar-card's small icon+number "stat tile"
++// pattern with the classic app-grid convention (icon, one headline number,
++// a short status line) that Håkan asked for explicitly ("kvadratiska...
++// bredvid varandra").
++//
++// Deliberately a MUCH smaller sibling of StatusCard, not a variant/prop on
++// it: a compact tile shows exactly one headline value and one status line,
++// no metrics list, no headerRight controls — trying to cram StatusCard's
++// full shape into a small box would fight the whole point of compacting it.
++//
++// Static per-color class maps, duplicated from StatusCard's own
++// colorClasses/iconColorClasses rather than imported — same reasoning
++// NibeLiveCard.tsx's STATUS_TEXT_CLASSES gives: Tailwind's build only picks
++// up class names it can see literally in source, so sharing color logic via
++// a `text-${color}-600`-style template string would silently drop those
++// classes from the production CSS.
++export type CompactStatusColor = 'blue' | 'green' | 'yellow' | 'red' | 'purple';
++
++const COLOR_CLASSES: Record<CompactStatusColor, string> = {
++  blue: 'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800',
++  green: 'bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-800',
++  red: 'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800',
++  yellow: 'bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800',
++  purple: 'bg-purple-50 border-purple-200 dark:bg-purple-900/20 dark:border-purple-800',
++};
++
++const ICON_COLOR_CLASSES: Record<CompactStatusColor, string> = {
++  blue: 'text-blue-600 dark:text-blue-400',
++  green: 'text-green-600 dark:text-green-400',
++  red: 'text-red-600 dark:text-red-400',
++  yellow: 'text-yellow-600 dark:text-yellow-400',
++  purple: 'text-purple-600 dark:text-purple-400',
++};
++
++export interface CompactStatusCardProps {
++  title: string;
++  icon: React.ComponentType<{ className?: string }>;
++  color: CompactStatusColor;
++  keyValue: string;
++  keyUnit?: string;
++  /** One short line under the headline value — a secondary metric or the
++   * current status, never a list (see module docstring). */
++  statusLine?: string;
++  /** Error/no-data note, rendered in place of statusLine when present. */
++  annotation?: string;
++}
++
++export default function CompactStatusCard({
++  title,
++  icon: Icon,
++  color,
++  keyValue,
++  keyUnit,
++  statusLine,
++  annotation,
++}: CompactStatusCardProps) {
++  return (
++    <div
++      className={`border rounded-lg p-3 aspect-square flex flex-col justify-between ${COLOR_CLASSES[color]}`}
++    >
++      <div className="flex items-center min-w-0">
++        <Icon className={`h-4 w-4 ${ICON_COLOR_CLASSES[color]} mr-1.5 shrink-0`} />
++        <h3 className="text-xs font-medium text-gray-600 dark:text-gray-400 truncate">
++          {title}
++        </h3>
++      </div>
++
++      <div>
++        <p className="text-xl font-bold text-gray-900 dark:text-gray-100 leading-tight truncate">
++          {keyValue}
++          {keyUnit && (
++            <span className="text-xs font-normal text-gray-600 dark:text-gray-400 ml-1">
++              {keyUnit}
++            </span>
++          )}
++        </p>
++        {annotation ? (
++          <p className="text-xs text-red-500 dark:text-red-400 truncate mt-0.5">{annotation}</p>
++        ) : statusLine ? (
++          <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">{statusLine}</p>
++        ) : null}
++      </div>
++    </div>
++  );
++}
+diff --git a/home_energy_manager/frontend/src/components/CompactStatusRow.tsx b/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
+new file mode 100644
+index 0000000..57f35c1
+--- /dev/null
++++ b/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
+@@ -0,0 +1,159 @@
++import { Activity, Car, Flame, Zap } from 'lucide-react';
++import CompactStatusCard from './CompactStatusCard';
++import { usePerificPower } from '../hooks/usePerificPower';
++import { useGovernorStatus } from '../hooks/useGovernorStatus';
++import { useEvSchedulerStatus } from '../hooks/useEvSchedulerStatus';
++import { useNibeStatus } from '../hooks/useNibeStatus';
++import { useNibeSavings } from '../hooks/useNibeSavings';
++import { heatingStatusColor, heatingStatusLabel } from '../lib/nibeStatusLabels';
++
++// Dashboard-compaction phase (2026-09-28): Perific One, Effektvakt,
++// EV-laddning and Nibe side by side in one compact row — Håkan's explicit
++// ask ("effektvakt, perific one ev laddning och nibe ska få plats bredvid
++// varandra"). Replaces those four sections' previous full-width StatusCard
++// rendering on the Dashboard (PerificPowerCard/GovernorStatusCard/
++// EvSchedulerStatusCard stay defined but are no longer mounted here; the
++// old NibeStatusCard was retired outright — its "Lyxläge varmvatten" toggle
++// moved to NibeControls.tsx on the /nibe page, and its status display is
++// superseded by this row plus NibeLiveCard). Full Nibe detail now lives
++// solely on the dedicated /nibe page (NibeDriftPage), per Håkan's "övriga
++// nibe-värden behövs bara på nibe-sidan".
++//
++// One row component rather than four separate default-exported cards,
++// since these four are always shown together now — matches the "self-
++// fetching hook, no props" convention every other status section already
++// uses, just packaged once instead of four times.
++const GOVERNOR_STATUS_LABELS: Record<string, string> = {
++  within_budget: 'Inom budget',
++  throttling_ev: 'Stryper EV',
++  no_data: 'Ingen data',
++};
++
++const GOVERNOR_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' | 'purple'> = {
++  within_budget: 'green',
++  throttling_ev: 'yellow',
++  no_data: 'red',
++};
++
++const EV_STATUS_LABELS: Record<string, string> = {
++  no_data: 'Ingen data',
++  not_plugged_in: 'Ej inkopplad',
++  blocked_battery_discharging: 'Blockerad',
++  blocked_above_cap: 'Över SOC-tak',
++  allowed_override: 'Laddar (override)',
++  allowed_solar_surplus: 'Laddar (sol)',
++  allowed_low_price: 'Laddar (lågpris)',
++};
++
++const EV_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' | 'purple'> = {
++  no_data: 'red',
++  not_plugged_in: 'blue',
++  blocked_battery_discharging: 'yellow',
++  blocked_above_cap: 'yellow',
++  allowed_override: 'green',
++  allowed_solar_surplus: 'green',
++  allowed_low_price: 'green',
++};
++
++export default function CompactStatusRow() {
++  const perific = usePerificPower();
++  const governor = useGovernorStatus();
++  const ev = useEvSchedulerStatus();
++  const nibeStatus = useNibeStatus();
++  const nibeSavings = useNibeSavings();
++
++  // Perific One — headline totaleffekt (kW), no second line (mirrors the
++  // full-size card's own lack of extra metrics).
++  const perificValue =
++    perific.available && perific.powerKw !== null ? perific.powerKw.toFixed(2) : '—';
++
++  // Effektvakt — headline status, subline uppmätt toppimport.
++  const governorValue = !governor.enabled
++    ? 'Av'
++    : governor.status !== null
++      ? (GOVERNOR_STATUS_LABELS[governor.status] ?? governor.status)
++      : 'Väntar…';
++  const governorColor = !governor.enabled
++    ? 'blue'
++    : governor.status !== null
++      ? (GOVERNOR_STATUS_COLORS[governor.status] ?? 'blue')
++      : 'blue';
++  const governorStatusLine =
++    governor.enabled && governor.recentPeakKw !== null
++      ? `Topp: ${governor.recentPeakKw.toFixed(1)} kW`
++      : undefined;
++
++  // EV-laddning — headline SOC nu, subline SOC-tak.
++  const evEnabled = ev.enabled;
++  const evStatus = ev.status === 'allowed_below_cap'
++    ? (ev.chargingAllowed ? 'Laddar (billigt)' : 'Väntar')
++    : ev.status !== null
++      ? (EV_STATUS_LABELS[ev.status] ?? ev.status)
++      : 'Väntar…';
++  const evColor: 'blue' | 'green' | 'yellow' | 'red' | 'purple' = !evEnabled
++    ? 'blue'
++    : ev.status === 'allowed_below_cap'
++      ? (ev.chargingAllowed ? 'green' : 'blue')
++      : ev.status !== null
++        ? (EV_STATUS_COLORS[ev.status] ?? 'blue')
++        : 'blue';
++  const evValue = evEnabled && ev.evSocPercent !== null ? `${ev.evSocPercent.toFixed(0)}%` : evStatus;
++  const evStatusLine = evEnabled
++    ? ev.socCapPercent !== null
++      ? `Tak: ${ev.socCapPercent.toFixed(0)}%`
++      : evStatus
++    : undefined;
++
++  // Nibe — headline uppskattad besparing idag (kr), subline
++  // rumsuppvärmningsstatus. Full breakdown (formel, historik) lives on
++  // /nibe only, per Håkan's "övriga nibe-värden behövs bara på nibe-sidan".
++  const nibeValue = !nibeStatus.enabled
++    ? 'Av'
++    : `${nibeSavings.totalSavingsKr.toFixed(1)}`;
++  const nibeColor = !nibeStatus.enabled
++    ? 'blue'
++    : heatingStatusColor(nibeStatus.heating.status);
++  const nibeStatusLine = nibeStatus.enabled
++    ? heatingStatusLabel(nibeStatus.heating.status)
++    : undefined;
++
++  return (
++    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
++      <CompactStatusCard
++        title="Perific One"
++        icon={Zap}
++        color="yellow"
++        keyValue={perificValue}
++        keyUnit="kW"
++        annotation={perific.error ? 'Kunde inte nå API:t' : undefined}
++      />
++      <CompactStatusCard
++        title="Effektvakt"
++        icon={Activity}
++        color={governorColor}
++        keyValue={governorValue}
++        statusLine={governorStatusLine}
++        annotation={governor.error ? 'Kunde inte nå API:t' : undefined}
++      />
++      <CompactStatusCard
++        title="EV-laddning"
++        icon={Car}
++        color={evColor}
++        keyValue={evValue}
++        statusLine={evStatusLine}
++        annotation={ev.error ? 'Kunde inte nå API:t' : undefined}
++      />
++      <CompactStatusCard
++        title="Nibe"
++        icon={Flame}
++        color={nibeColor}
++        keyValue={nibeValue}
++        keyUnit={nibeStatus.enabled ? 'kr idag' : undefined}
++        statusLine={nibeStatusLine}
++        annotation={
++          nibeStatus.error || nibeSavings.error ? 'Kunde inte nå API:t' : undefined
++        }
++      />
++    </div>
++  );
++}
+diff --git a/home_energy_manager/frontend/src/components/NibeControls.tsx b/home_energy_manager/frontend/src/components/NibeControls.tsx
+new file mode 100644
+index 0000000..36e6d73
+--- /dev/null
++++ b/home_energy_manager/frontend/src/components/NibeControls.tsx
+@@ -0,0 +1,52 @@
++import { useNibeStatus } from '../hooks/useNibeStatus';
++
++// Dashboard-compaction phase (2026-09-28): "Lyxläge varmvatten" used to be
++// NibeStatusCard's headerRight button on the Dashboard. NibeStatusCard was
++// retired when the Dashboard's Nibe section was replaced by a compact,
++// read-only status tile (see CompactStatusRow.tsx) — that tile has no room
++// for an interactive control, so this button needed a new home rather than
++// disappearing. Its own small component, not folded into NibeLiveCard,
++// which documents itself as read-only/zero-writes on purpose; this keeps
++// that contract intact and gives the Nibe page's one write control an
++// explicit, separate place.
++export default function NibeControls() {
++  const { enabled, dhwLuxuryEnabled, togglingDhwLuxury, setDhwLuxuryEnabled, error } =
++    useNibeStatus();
++
++  if (!enabled) {
++    // Mirrors every other Nibe UI's convention: nothing to control while
++    // the nibe.enabled master switch itself is off (see nibe_api.py).
++    return null;
++  }
++
++  return (
++    <div className="flex items-center justify-between gap-4 border rounded-lg p-4 border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
++      <div className="min-w-0">
++        <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
++          Lyxläge varmvatten
++        </div>
++        <div className="text-xs text-gray-500 dark:text-gray-400">
++          Lyxläge när elen är billig eller vid solöverskott, alltid inom effektvaktens
++          utrymme. Annars Ekonomi.
++        </div>
++        {error && (
++          <div className="text-xs text-red-500 dark:text-red-400 mt-1">
++            Kunde inte nå API:t: {error}
++          </div>
++        )}
++      </div>
++      <button
++        type="button"
++        onClick={() => setDhwLuxuryEnabled(!dhwLuxuryEnabled)}
++        disabled={togglingDhwLuxury}
++        className={`text-xs font-medium px-2.5 py-1 rounded-md border transition-colors shrink-0 ${
++          dhwLuxuryEnabled
++            ? 'bg-green-100 text-green-800 border-green-300 dark:bg-green-900/30 dark:text-green-400 dark:border-green-700'
++            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50 dark:bg-gray-700 dark:text-gray-200 dark:border-gray-600 dark:hover:bg-gray-600'
++        } disabled:opacity-50`}
++      >
++        {dhwLuxuryEnabled ? 'Lyxläge varmvatten: På' : 'Lyxläge varmvatten: Av'}
++      </button>
++    </div>
++  );
++}
+diff --git a/home_energy_manager/frontend/src/components/NibeSavingsCard.tsx b/home_energy_manager/frontend/src/components/NibeSavingsCard.tsx
+new file mode 100644
+index 0000000..191566f
+--- /dev/null
++++ b/home_energy_manager/frontend/src/components/NibeSavingsCard.tsx
+@@ -0,0 +1,50 @@
++import { DollarSign } from 'lucide-react';
++import { useNibeSavings } from '../hooks/useNibeSavings';
++
++// Dashboard-compaction phase (2026-09-28): the full breakdown behind
++// CompactStatusRow's compact "kr idag" figure — see core/nibe/savings.py's
++// module docstring for the full methodology and why this is a MODEL, not a
++// measurement. Every number here is labeled accordingly; this is the one
++// place the model's own assumptions (heat-loss coefficient, assumed COP)
++// are shown, so Håkan can judge how much to trust the headline figure.
++export default function NibeSavingsCard() {
++  const {
++    totalSavingsKr,
++    totalAvoidedKwh,
++    activeHours,
++    heatLossCoefficientKwPerC,
++    assumedCop,
++    error,
++  } = useNibeSavings();
++
++  return (
++    <div className="border rounded-lg p-4 border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
++      <div className="flex items-center text-sm text-gray-500 dark:text-gray-400 mb-2">
++        <DollarSign className="h-4 w-4 mr-1.5" />
++        Uppskattad besparing idag — sänkt värme vid dyra timmar
++      </div>
++      <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
++        {totalSavingsKr.toFixed(1)}{' '}
++        <span className="text-sm font-normal text-gray-500 dark:text-gray-400">kr</span>
++      </div>
++      <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
++        {activeHours} timme{activeHours !== 1 ? 'r' : ''} med sänkt kurvoffset idag · ~
++        {totalAvoidedKwh.toFixed(2)} kWh uppskattat undviken förbrukning (modell)
++      </div>
++      {heatLossCoefficientKwPerC !== null && assumedCop !== null && (
++        <div className="text-xs text-gray-400 dark:text-gray-500 mt-2">
++          Modellantaganden: {heatLossCoefficientKwPerC} kW/°C värmeförlust, antagen COP{' '}
++          {assumedCop} — inte uppmätta värden för just denna installation. Räknar bara den
++          aktiva sänkningen vid dyra timmar, inte boost-spakarna (sol/billigt pris/
++          pristopp-förvärmning) som flyttar förbrukning i tiden snarare än minskar den.
++          Gäller idag så här långt, inte ett rullande dygn.
++        </div>
++      )}
++      {error && (
++        <div className="text-xs text-red-500 dark:text-red-400 mt-2">
++          Kunde inte nå API:t: {error}
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/home_energy_manager/frontend/src/components/NibeStatusCard.tsx b/home_energy_manager/frontend/src/components/NibeStatusCard.tsx
+deleted file mode 100644
+index 7c8a9a7..0000000
+--- a/home_energy_manager/frontend/src/components/NibeStatusCard.tsx
++++ /dev/null
+@@ -1,90 +0,0 @@
+-import { Flame } from 'lucide-react';
+-import { StatusCard } from './SystemStatusCard';
+-import { useNibeStatus } from '../hooks/useNibeStatus';
+-import {
+-  dhwStatusLabel,
+-  heatingStatusColor,
+-  heatingStatusLabel,
+-} from '../lib/nibeStatusLabels';
+-
+-/**
+- * Fas 4a's one visible piece of Nibe UI: the space-heating curve-offset
+- * boost status, plus the "Lyxläge varmvatten" toggle and its current
+- * comfort mode. Mirrors GovernorStatusCard/EvSchedulerStatusCard's shape
+- * (reuse StatusCard, self-fetching hook) and the same "never a recomputed
+- * hypothetical" contract — reflects _poll_nibe's last applied decisions
+- * exactly as nibe_api.py returns them.
+- *
+- * REVISED 2026-09-22: the lever behind this card used to be SG Ready
+- * (switch.sg_ready_heating_*); it's now number.heat_offset_s1_* directly
+- * (see core/nibe/decision.py's MECHANISM CHOICE section) — true SG Ready
+- * needs two physical relay-driven AUX inputs Håkan doesn't have wired.
+- * The card's own labels/title were updated to match; only the internal
+- * `heating.offsetC` field name changed on the wire (was `heating.active`).
+- */
+-export default function NibeStatusCard() {
+-  const {
+-    enabled,
+-    dhwLuxuryEnabled,
+-    heating,
+-    dhw,
+-    error,
+-    togglingDhwLuxury,
+-    setDhwLuxuryEnabled,
+-  } = useNibeStatus();
+-
+-  const heatingValue = !enabled
+-    ? 'Av'
+-    : heatingStatusLabel(heating.status) +
+-      (heating.offsetC ? ` (offset +${heating.offsetC})` : '');
+-
+-  const heatingColor = !enabled ? 'blue' : heatingStatusColor(heating.status);
+-
+-  const dhwValue = !enabled
+-    ? 'Av'
+-    : !dhwLuxuryEnabled
+-      ? 'Av'
+-      : dhwStatusLabel(dhw.status);
+-
+-  return (
+-    <StatusCard
+-      title="Nibe F750"
+-      icon={Flame}
+-      color={heatingColor}
+-      keyMetric="Rumsuppvärmning (värmekurva-offset)"
+-      keyValue={heatingValue}
+-      keyUnit=""
+-      keyAnnotation={
+-        error
+-          ? [`Kunde inte nå API:t: ${error}`]
+-          : enabled && heating.reason
+-            ? [heating.reason]
+-            : undefined
+-      }
+-      metrics={[
+-        {
+-          label: 'Lyxläge varmvatten',
+-          value: dhwValue,
+-          unit: '',
+-        },
+-      ]}
+-      headerRight={
+-        enabled ? (
+-          <button
+-            type="button"
+-            onClick={() => setDhwLuxuryEnabled(!dhwLuxuryEnabled)}
+-            disabled={togglingDhwLuxury}
+-            className={`text-xs font-medium px-2.5 py-1 rounded-md border transition-colors ${
+-              dhwLuxuryEnabled
+-                ? 'bg-green-100 text-green-800 border-green-300 dark:bg-green-900/30 dark:text-green-400 dark:border-green-700'
+-                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50 dark:bg-gray-700 dark:text-gray-200 dark:border-gray-600 dark:hover:bg-gray-600'
+-            } disabled:opacity-50`}
+-            title="Sätt varmvatten till Lyxläge när elen är billig eller vid solöverskott, alltid inom effektvaktens utrymme. Annars Ekonomi."
+-          >
+-            {dhwLuxuryEnabled ? 'Lyxläge varmvatten: På' : 'Lyxläge varmvatten: Av'}
+-          </button>
+-        ) : undefined
+-      }
+-    />
+-  );
+-}
+diff --git a/home_energy_manager/frontend/src/hooks/useNibeSavings.ts b/home_energy_manager/frontend/src/hooks/useNibeSavings.ts
+new file mode 100644
+index 0000000..9a4a84a
+--- /dev/null
++++ b/home_energy_manager/frontend/src/hooks/useNibeSavings.ts
+@@ -0,0 +1,63 @@
++import { useCallback, useEffect, useState } from 'react';
++import api from '../lib/api';
++
++// Mirrors GET /api/nibe/savings (backend/nibe_api.py) exactly, camelCase
++// included — see core/nibe/savings.py's module docstring for what this
++// number actually is (a modeled estimate of the price-peak reduction
++// lever's savings, today so far, NOT a measurement).
++export interface NibeSavingsHour {
++  timestamp: string;
++  offsetC: number | null;
++  priceOrePerKwh: number | null;
++  active: boolean;
++  avoidedKwh: number | null;
++  savingsKr: number | null;
++}
++
++export interface NibeSavingsResponse {
++  hours: NibeSavingsHour[];
++  totalAvoidedKwh: number;
++  totalSavingsKr: number;
++  activeHours: number;
++  heatLossCoefficientKwPerC: number | null;
++  assumedCop: number | null;
++}
++
++const EMPTY_SAVINGS: NibeSavingsResponse = {
++  hours: [],
++  totalAvoidedKwh: 0,
++  totalSavingsKr: 0,
++  activeHours: 0,
++  heatLossCoefficientKwPerC: null,
++  assumedCop: null,
++};
++
++/**
++ * Polls GET /api/nibe/savings every 5 minutes — this is a modeled estimate
++ * derived from hourly history, not a live-second value, so it doesn't need
++ * useNibeStatus's 30s cadence; a slower poll avoids repeatedly re-fetching
++ * Home Assistant's recorder history for a number that only changes once an
++ * hour at most.
++ */
++export function useNibeSavings() {
++  const [data, setData] = useState<NibeSavingsResponse>(EMPTY_SAVINGS);
++  const [error, setError] = useState<string | null>(null);
++
++  const fetchSavings = useCallback(async () => {
++    try {
++      const res = await api.get<NibeSavingsResponse>('/api/nibe/savings');
++      setData(res.data);
++      setError(null);
++    } catch (err) {
++      setError(err instanceof Error ? err.message : 'Failed to reach Nibe savings API');
++    }
++  }, []);
++
++  useEffect(() => {
++    fetchSavings();
++    const interval = setInterval(fetchSavings, 5 * 60_000);
++    return () => clearInterval(interval);
++  }, [fetchSavings]);
++
++  return { ...data, error };
++}
+diff --git a/home_energy_manager/frontend/src/pages/DashboardPage.tsx b/home_energy_manager/frontend/src/pages/DashboardPage.tsx
+index efe7db8..2269685 100644
+--- a/home_energy_manager/frontend/src/pages/DashboardPage.tsx
++++ b/home_energy_manager/frontend/src/pages/DashboardPage.tsx
+@@ -6,11 +6,7 @@ import { BatterySettings, ElectricitySettings } from '../types';
+ import { Clock, AlertCircle } from 'lucide-react';
+ import EnergyFlowCards from '../components/EnergyFlowCards';
+ import SystemStatusCard from '../components/SystemStatusCard';
+-import PerificPowerCard from '../components/PerificPowerCard';
+-import GovernorStatusCard from '../components/GovernorStatusCard';
+-import EvSchedulerStatusCard from '../components/EvSchedulerStatusCard';
+-import NibeStatusCard from '../components/NibeStatusCard';
+-import NibeHistoryCharts from '../components/NibeHistoryCharts';
++import CompactStatusRow from '../components/CompactStatusRow';
+ import BatterySocRangeCard from '../components/BatterySocRangeCard';
+ import InverterWriteAccessCard from '../components/InverterWriteAccessCard';
+ import AlertBanner from '../components/AlertBanner';
+@@ -398,38 +394,17 @@ export default function DashboardPage({
+             </div>
+           </div>
+ 
+-          {/* Fas 2: Perific One real-time power (home-energy-manager) */}
++          {/* Dashboard-compaction phase (2026-09-28): Perific One,
++              Effektvakt, EV-laddning and Nibe compacted into one row of
++              small square tiles, per Håkan's explicit ask — see
++              CompactStatusRow.tsx's own docstring. Nibe's detailed
++              controls/history (incl. "Lyxläge varmvatten") moved to the
++              dedicated /nibe page; only a compact savings/status summary
++              stays here. */}
+           <div className="space-y-6">
+             <div>
+-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Perific One</h2>
+-              <PerificPowerCard />
+-            </div>
+-          </div>
+-
+-          {/* Fas 3b: peak-power governor (EV lever) status */}
+-          <div className="space-y-6">
+-            <div>
+-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Effektvakt</h2>
+-              <GovernorStatusCard />
+-            </div>
+-          </div>
+-
+-          {/* Fas 5c: EV price/SOC/solar scheduler status */}
+-          <div className="space-y-6">
+-            <div>
+-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">EV-laddning</h2>
+-              <EvSchedulerStatusCard />
+-            </div>
+-          </div>
+-
+-          {/* Fas 4a: Nibe F750 SG Ready heating boost + Lyxläge varmvatten */}
+-          <div className="space-y-6">
+-            <div>
+-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Nibe</h2>
+-              <NibeStatusCard />
+-              <div className="mt-6">
+-                <NibeHistoryCharts />
+-              </div>
++              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Status</h2>
++              <CompactStatusRow />
+             </div>
+           </div>
+ 
+diff --git a/home_energy_manager/frontend/src/pages/NibeDriftPage.tsx b/home_energy_manager/frontend/src/pages/NibeDriftPage.tsx
+index 5b2a8e4..1829dbd 100644
+--- a/home_energy_manager/frontend/src/pages/NibeDriftPage.tsx
++++ b/home_energy_manager/frontend/src/pages/NibeDriftPage.tsx
+@@ -1,14 +1,23 @@
+ import NibeLiveCard from '../components/NibeLiveCard';
+ import NibeHistoryCharts from '../components/NibeHistoryCharts';
++import NibeControls from '../components/NibeControls';
++import NibeSavingsCard from '../components/NibeSavingsCard';
+ 
+-// New dedicated Nibe page (2026-09-28), built at Håkan's explicit request:
++// Dedicated Nibe page (2026-09-28), built at Håkan's explicit request:
+ // "vad som sker för sekunden" — real-time operating data, which the
+-// Dashboard's NibeStatusCard (a 30s-cached last-decision summary) and
+-// NibeHistoryCharts (hourly trends) don't show on their own. Both existing
+-// components stay exactly where they are on the Dashboard too; this page
+-// is additive, not a replacement, and simply gives Nibe its own place that
+-// combines "right now" (NibeLiveCard, polls every 10s) with "the last
+-// 24h/48h/7 days" (NibeHistoryCharts, unchanged) in one view.
++// Dashboard's old NibeStatusCard (a 30s-cached last-decision summary) and
++// NibeHistoryCharts (hourly trends) didn't show on their own.
++//
++// Dashboard-compaction phase (also 2026-09-28, same day): now that this
++// page exists, Håkan asked for the detailed Nibe UI to live here ONLY
++// ("övriga nibe-värden behövs bara på nibe-sidan") — the Dashboard itself
++// now shows just a compact status/savings tile (CompactStatusRow.tsx). Two
++// things moved here as a result: the "Lyxläge varmvatten" toggle
++// (NibeControls, previously NibeStatusCard's headerRight button — this
++// page's one write control, deliberately its own component since
++// NibeLiveCard documents itself as read-only) and the full cost-savings
++// breakdown (NibeSavingsCard) behind the Dashboard's compact "kr idag"
++// figure.
+ export default function NibeDriftPage() {
+   return (
+     <div className="space-y-8">
+@@ -19,6 +28,20 @@ export default function NibeDriftPage() {
+         <NibeLiveCard />
+       </div>
+ 
++      <div>
++        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
++          Styrning
++        </h2>
++        <NibeControls />
++      </div>
++
++      <div>
++        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
++          Kostnadsbesparing
++        </h2>
++        <NibeSavingsCard />
++      </div>
++
+       <div>
+         <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
+           Historik
+-- 
+2.43.0
+
