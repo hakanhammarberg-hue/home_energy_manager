@@ -82,6 +82,16 @@ EV_PLUG_ENTITY = "binary_sensor.ev3_ev_battery_plug"
 EV_CHARGING_ENTITY = "binary_sensor.ev3_ev_battery_charge"
 EV_CHARGE_DURATION_ENTITY = "sensor.ev3_estimated_charge_duration"
 
+# Added 2026-09-30 for the compact dashboard row's "is it actually charging,
+# and at what power" ask (Håkan: "Laddningsrutan för elbil kan berätta om
+# laddning pågår eller ej och med vilken effekt"). This is the Zaptec
+# charger's OWN measured output (kW), not the car's — same charger device as
+# ZAPTEC_AVAILABLE_CURRENT_ENTITY/ZAPTEC_CHARGING_SWITCH_ENTITY above, so it
+# reads 0.0 (not None/unavailable) whenever the charger is idle/disconnected,
+# which _to_float already handles correctly. Confirmed live against Håkan's
+# HA instance 2026-09-30 (sensor.gpn049831_laddeffekt).
+EV_CHARGING_POWER_ENTITY = "sensor.gpn049831_laddeffekt"
+
 # Fas 4a: same stopgap as Perific/Zaptec above — no Nibe settings tab yet.
 # Confirmed live against Håkan's HA instance (2026-09 conversation), device
 # area "Tvättstuga", nibe_heatpump integration via the LilyGO/ESPHome UDP
@@ -302,6 +312,10 @@ class BESSController:
         # automation (ev_scheduler.enabled) is itself switched on.
         self.ev_last_charging_active: bool | None = None
         self.ev_last_charge_duration_min: float | None = None
+        # Added 2026-09-30, same "always-on car/charger fact" reasoning as
+        # the two fields above — the compact dashboard row's charging-power
+        # ask (see EV_CHARGING_POWER_ENTITY's own comment).
+        self.ev_last_charging_power_kw: float | None = None
         # Not user-facing — the plug reading from the previous poll tick,
         # so _poll_ev_charging can pass ev_scheduler.decide() a real
         # was_plug_connected instead of guessing. See that function's own
@@ -641,6 +655,9 @@ class BESSController:
 
         duration_raw = self._read_raw_entity_state(EV_CHARGE_DURATION_ENTITY)
         self.ev_last_charge_duration_min = self._to_float(duration_raw)
+
+        power_raw = self._read_raw_entity_state(EV_CHARGING_POWER_ENTITY)
+        self.ev_last_charging_power_kw = self._to_float(power_raw)
 
         ev_settings = self.settings_store.get_section("ev_scheduler")
         if not ev_settings.get("enabled", False):

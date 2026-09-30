@@ -29,6 +29,11 @@ export interface EvSchedulerStatusResponse {
   /** Kia UVO's own "time to full" estimate (minutes), via whatever charger
    * is currently connected — null when not charging or not yet reported. */
   estimatedChargeDurationMin: number | null;
+  /** The Zaptec charger's own measured output power (kW) — 0 when idle/
+   * disconnected, null only before the first poll tick since startup. See
+   * app.py's EV_CHARGING_POWER_ENTITY for why this is the charger's own
+   * reading rather than something derived from the car. */
+  chargingPowerKw: number | null;
 }
 
 /**
@@ -52,6 +57,7 @@ export function useEvSchedulerStatus() {
     reason: null,
     chargingActive: null,
     estimatedChargeDurationMin: null,
+    chargingPowerKw: null,
   });
   const [error, setError] = useState<string | null>(null);
   const [requestingOverride, setRequestingOverride] = useState(false);

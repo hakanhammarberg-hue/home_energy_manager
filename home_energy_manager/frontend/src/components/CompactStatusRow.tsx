@@ -23,6 +23,17 @@ import { heatingStatusColor, heatingStatusLabel } from '../lib/nibeStatusLabels'
 // since these four are always shown together now — matches the "self-
 // fetching hook, no props" convention every other status section already
 // uses, just packaged once instead of four times.
+//
+// Richer-tiles pass (2026-09-30): Håkan asked for each tile to carry more
+// information ("Varje ruta bör kunna innehålla betydligt mer information"),
+// specifically calling out EV-laddning (charging active + power) and
+// Perific One (the effektvakt/governor target), and explicitly excluding
+// Nibe ("förutom nibe-värden förmodar jag" — that tile already just
+// summarizes what the dedicated /nibe page covers in full). Effektvakt got
+// its own small addition (the same target number, for symmetry with
+// Perific One) as the obvious "what else is relevant" call. Implemented via
+// CompactStatusCard's new optional `metrics` prop rather than growing
+// keyValue/statusLine further — see that component's docstring.
 const GOVERNOR_STATUS_LABELS: Record<string, string> = {
   within_budget: 'Inom budget',
   throttling_ev: 'Stryper EV',
@@ -80,12 +91,35 @@ export default function CompactStatusRow() {
   const nibeStatus = useNibeStatus();
   const nibeSavings = useNibeSavings();
 
-  // Perific One — headline totaleffekt (kW), no second line (mirrors the
-  // full-size card's own lack of extra metrics).
+  // Perific One — headline totaleffekt (kW). Added 2026-09-30, Håkan's
+  // explicit ask ("perific one rutan kan kompletteras med
+  // effektvaktsinställningen"): show the governor's configured target here
+  // too, since Perific One's own reading is exactly what that target is
+  // measured against — plus a derived margin (target minus current draw)
+  // as the obvious next-most-useful number once the target itself is
+  // visible. Both only shown while the governor is actually on; showing a
+  // target for a feature that isn't enforcing anything would be noise.
   const perificValue =
     perific.available && perific.powerKw !== null ? perific.powerKw.toFixed(2) : '—';
+  const perificMetrics =
+    governor.enabled && governor.targetKw !== null
+      ? [
+          { label: 'Effektvakt mål', value: `${governor.targetKw.toFixed(1)} kW` },
+          ...(perific.available && perific.powerKw !== null
+            ? [
+                {
+                  label: 'Marginal',
+                  value: `${(governor.targetKw - perific.powerKw).toFixed(1)} kW`,
+                },
+              ]
+            : []),
+        ]
+      : undefined;
 
-  // Effektvakt — headline status, subline uppmätt toppimport.
+  // Effektvakt — headline status, subline uppmätt toppimport, plus the
+  // configured target (added 2026-09-30 alongside Perific One's mirror of
+  // the same number — seeing "Topp: 8.2 kW" without "Mål: 12 kW" next to it
+  // told only half the story).
   const governorValue = !governor.enabled
     ? 'Av'
     : governor.status !== null
@@ -99,6 +133,10 @@ export default function CompactStatusRow() {
   const governorStatusLine =
     governor.enabled && governor.recentPeakKw !== null
       ? `Topp: ${governor.recentPeakKw.toFixed(1)} kW`
+      : undefined;
+  const governorMetrics =
+    governor.enabled && governor.targetKw !== null
+      ? [{ label: 'Mål', value: `${governor.targetKw.toFixed(1)} kW` }]
       : undefined;
 
   // EV-laddning — headline Kians nuvarande SOC (alltid när bilen rapporterar
@@ -132,6 +170,25 @@ export default function CompactStatusRow() {
         ? `Tak: ${ev.socCapPercent.toFixed(0)}%`
         : evStatus
       : undefined);
+  // Added 2026-09-30, Håkan's explicit ask ("Laddningsrutan för elbil kan
+  // berätta om laddning pågår eller ej och med vilken effekt"): the
+  // charger's own always-on facts (see useEvSchedulerStatus's docstring —
+  // chargingActive/chargingPowerKw are read every tick regardless of
+  // evEnabled), so this shows even while the price/solar automation itself
+  // is off. Distinct from evStatusLine above, which is about the
+  // SCHEDULER's decision/ETA — this metric is about the charger's own
+  // measured reality.
+  const evChargingMetrics = [
+    {
+      label: 'Laddning',
+      value:
+        ev.chargingActive === null
+          ? 'Ingen data'
+          : ev.chargingActive
+            ? `${(ev.chargingPowerKw ?? 0).toFixed(1)} kW`
+            : 'Ej aktiv',
+    },
+  ];
 
   // Nibe — headline uppskattad besparing idag (kr), subline
   // rumsuppvärmningsstatus. Full breakdown (formel, historik) lives on
@@ -154,6 +211,7 @@ export default function CompactStatusRow() {
         color="yellow"
         keyValue={perificValue}
         keyUnit="kW"
+        metrics={perificMetrics}
         annotation={perific.error ? 'Kunde inte nå API:t' : undefined}
       />
       <CompactStatusCard
@@ -162,6 +220,7 @@ export default function CompactStatusRow() {
         color={governorColor}
         keyValue={governorValue}
         statusLine={governorStatusLine}
+        metrics={governorMetrics}
         annotation={governor.error ? 'Kunde inte nå API:t' : undefined}
       />
       <CompactStatusCard
@@ -170,6 +229,7 @@ export default function CompactStatusRow() {
         color={evColor}
         keyValue={evValue}
         statusLine={evStatusLine}
+        metrics={evChargingMetrics}
         annotation={ev.error ? 'Kunde inte nå API:t' : undefined}
       />
       <CompactStatusCard

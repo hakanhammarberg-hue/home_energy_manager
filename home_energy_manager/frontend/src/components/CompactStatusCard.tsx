@@ -48,6 +48,11 @@ const ICON_COLOR_CLASSES: Record<CompactStatusColor, string> = {
   purple: 'text-purple-600 dark:text-purple-400',
 };
 
+export interface CompactStatusMetric {
+  label: string;
+  value: string;
+}
+
 export interface CompactStatusCardProps {
   title: string;
   icon: React.ComponentType<{ className?: string }>;
@@ -57,8 +62,19 @@ export interface CompactStatusCardProps {
   /** One short line under the headline value — a secondary metric or the
    * current status, never a list (see module docstring). */
   statusLine?: string;
-  /** Error/no-data note, rendered in place of statusLine when present. */
+  /** Error/no-data note, rendered in place of statusLine AND metrics when
+   * present (an unreachable API means none of this tile's data is fresh). */
   annotation?: string;
+  /**
+   * Added 2026-09-30 for Håkan's "varje ruta bör kunna innehålla betydligt
+   * mer information" ask — a couple of extra label/value facts (e.g. the
+   * governor's configured target, or the EV charger's live power) that
+   * don't fit the single headline+statusLine shape. Rendered as compact
+   * label/value rows, capped at 2 by convention (not enforced here) to
+   * keep tiles from growing tall again — see CompactStatusCard's own
+   * 2026-09-29 aspect-square lesson in the module docstring above.
+   */
+  metrics?: CompactStatusMetric[];
 }
 
 export default function CompactStatusCard({
@@ -69,6 +85,7 @@ export default function CompactStatusCard({
   keyUnit,
   statusLine,
   annotation,
+  metrics,
 }: CompactStatusCardProps) {
   return (
     <div className={`border rounded-lg p-2.5 flex flex-col gap-1 ${COLOR_CLASSES[color]}`}>
@@ -90,9 +107,26 @@ export default function CompactStatusCard({
         </p>
         {annotation ? (
           <p className="text-xs text-red-500 dark:text-red-400 truncate mt-0.5">{annotation}</p>
-        ) : statusLine ? (
-          <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">{statusLine}</p>
-        ) : null}
+        ) : (
+          <>
+            {statusLine && (
+              <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
+                {statusLine}
+              </p>
+            )}
+            {metrics?.map(m => (
+              <p
+                key={m.label}
+                className="flex justify-between gap-2 text-[11px] text-gray-500 dark:text-gray-400 truncate"
+              >
+                <span className="truncate">{m.label}</span>
+                <span className="shrink-0 font-medium text-gray-600 dark:text-gray-300">
+                  {m.value}
+                </span>
+              </p>
+            ))}
+          </>
+        )}
       </div>
     </div>
   );

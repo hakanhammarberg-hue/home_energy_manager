@@ -54,6 +54,12 @@ def _status_payload(bess_controller: Any) -> dict:
         "estimatedChargeDurationMin": getattr(
             bess_controller, "ev_last_charge_duration_min", None
         ),
+        # Added 2026-09-30: the Zaptec charger's own measured output (kW),
+        # same always-on-fact treatment as chargingActive/
+        # estimatedChargeDurationMin above — see app.py's
+        # EV_CHARGING_POWER_ENTITY comment for why this is the charger's
+        # reading, not the car's.
+        "chargingPowerKw": getattr(bess_controller, "ev_last_charging_power_kw", None),
     }
 
 
@@ -67,11 +73,12 @@ async def get_ev_scheduler_status() -> dict:
     normal state, not an error — same as governor_api.py's equivalent
     fields.
 
-    ``evSocPercent``/``chargingActive``/``estimatedChargeDurationMin`` are
-    different: they're the car's own reported facts, read every 30s tick
-    regardless of whether the scheduler feature is enabled (see app.py's
-    _poll_ev_charging) — only null before the very first tick since
-    startup, or if the car itself hasn't reported that field.
+    ``evSocPercent``/``chargingActive``/``estimatedChargeDurationMin``/
+    ``chargingPowerKw`` are different: they're the car's/charger's own
+    reported facts, read every 30s tick regardless of whether the scheduler
+    feature is enabled (see app.py's _poll_ev_charging) — only null before
+    the very first tick since startup, or if the car/charger itself hasn't
+    reported that field.
     """
     from app import bess_controller
 
