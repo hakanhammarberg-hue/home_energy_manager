@@ -1,0 +1,72 @@
+From 45e687da6053e6f36638816daef0cf1dd15d8767 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 30 Sep 2026 15:18:46 +0000
+Subject: [PATCH 2/2] Revert to InfluxDB v2 token auth; document the real
+ bucket-naming pitfall
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The switch to username/password auth (assuming BESS Manager already had
+it working) was based on a false signal: BESS Manager's own Configuration
+tab still holds the schema placeholder username/password too. BESS
+Manager's complete historical data is explained by continuous uptime
+(it collects each period live, one per tick, and simply hasn't restarted
+today) rather than a working InfluxDB connection — its logs have zero
+InfluxDB mentions in the last 24h.
+
+Reverting the code (git revert of the username/password switch) back to
+the original v2 API token approach, and documenting in config.yaml the
+likely real reason the original token setup was never completed: the
+bucket field needs the bare v2 bucket name ("homeassistant"), not the
+InfluxDB 1.x "database/retentionpolicy" form ("homeassistant/autogen")
+that appears in BESS Manager's own (also unconfigured) bucket field.
+
+Bumped to v0.1.16.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01D9yfcLt9RHbqoZD18y9PT7
+---
+ home_energy_manager/config.yaml | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 145beb3..73b7fd0 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.14"
++version: "0.1.16"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+@@ -22,6 +22,24 @@ hassio_api: true
+ homeassistant_api: true
+ auth_api: true
+ options:
++  # Reverted 2026-09-30 to InfluxDB v2's native API (org + API token, Flux
++  # over /api/v2/query): a same-day attempt to switch to InfluxDB's
++  # v1-compatibility login (username + password) on the theory that BESS
++  # Manager already had that working turned out to rest on a false signal —
++  # BESS Manager's own Configuration tab was found to still hold the schema
++  # placeholder username/password too, never actually set up. BESS
++  # Manager's "complete" historical data has a much simpler explanation: it
++  # collects each period live as it happens and simply hasn't been
++  # restarted today, so it never needed to backfill from InfluxDB at all.
++  # There was no working credential to copy from either app.
++  #
++  # Going forward, when filling this in with a real v2 API token generated
++  # in the InfluxDB2 add-on's own web UI (Load Data > API Tokens > Generate
++  # API Token), the bucket field must be the bare v2 bucket name with NO
++  # retention-policy suffix — "homeassistant", not "homeassistant/autogen".
++  # That "/autogen" form is InfluxDB 1.x's database/retention-policy
++  # notation (visible in BESS Manager's own bucket field) and is the
++  # leading suspect for why an earlier token attempt here silently failed.
+   influxdb:
+     url: "http://homeassistant.local:8086/api/v2/query"
+     bucket: "homeassistant"
+-- 
+2.43.0
+
