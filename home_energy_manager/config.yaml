@@ -1,6 +1,6 @@
 name: "Home Energy Manager"
 description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
-version: "0.1.14"
+version: "0.1.15"
 slug: "home_energy_manager"
 # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
 # there's no registry to publish this fork's image to, so the Supervisor
@@ -22,16 +22,27 @@ hassio_api: true
 homeassistant_api: true
 auth_api: true
 options:
+  # Changed 2026-09-30: switched from InfluxDB v2's native API (org + API
+  # token, queried via Flux at /api/v2/query) to its built-in v1-compatibility
+  # login (username + password, queried via InfluxQL at /query) — the same
+  # simpler auth BESS Manager already uses successfully against this exact
+  # InfluxDB v2 server (the "InfluxDB2" add-on). Home Energy Manager's own
+  # v2/token setup was never actually completed (still on the schema
+  # placeholder token, confirmed via container logs showing
+  # "Historical Data Access: NOT_CONFIGURED" all day on 2026-09-30) — v1-style
+  # username/password is the credential BESS's Configuration tab already has
+  # working, so it can be copied straight across instead of generating a new
+  # v2 API token.
   influxdb:
-    url: "http://homeassistant.local:8086/api/v2/query"
-    bucket: "homeassistant"
-    org: "home_energy_manager"
-    token: "your_db_token_here"
+    url: "http://homeassistant.local:8086"
+    bucket: "homeassistant/autogen"
+    username: "your_db_username_here"
+    password: "your_db_password_here"
 schema:
   influxdb:
     url: str
     bucket: str
-    org: str
-    token: str
+    username: str
+    password: password
 environment:
   HA_TEST_MODE: "true"
