@@ -1,0 +1,325 @@
+From f76c669d852ac8b24a22c6f3ab2601a9f37a50c0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 30 Sep 2026 17:53:41 +0000
+Subject: [PATCH] Richer compact dashboard tiles: effektvakt target on Perific
+ One/Effektvakt, EV charging power on EV-laddning
+
+---
+ home_energy_manager/backend/app.py            | 17 +++++
+ .../backend/ev_scheduler_api.py               | 17 +++--
+ home_energy_manager/config.yaml               |  2 +-
+ .../src/components/CompactStatusCard.tsx      | 42 ++++++++++--
+ .../src/components/CompactStatusRow.tsx       | 66 ++++++++++++++++++-
+ .../src/hooks/useEvSchedulerStatus.ts         |  6 ++
+ 6 files changed, 137 insertions(+), 13 deletions(-)
+
+diff --git a/home_energy_manager/backend/app.py b/home_energy_manager/backend/app.py
+index 5662f0a..85c1beb 100644
+--- a/home_energy_manager/backend/app.py
++++ b/home_energy_manager/backend/app.py
+@@ -82,6 +82,16 @@ EV_PLUG_ENTITY = "binary_sensor.ev3_ev_battery_plug"
+ EV_CHARGING_ENTITY = "binary_sensor.ev3_ev_battery_charge"
+ EV_CHARGE_DURATION_ENTITY = "sensor.ev3_estimated_charge_duration"
+ 
++# Added 2026-09-30 for the compact dashboard row's "is it actually charging,
++# and at what power" ask (Håkan: "Laddningsrutan för elbil kan berätta om
++# laddning pågår eller ej och med vilken effekt"). This is the Zaptec
++# charger's OWN measured output (kW), not the car's — same charger device as
++# ZAPTEC_AVAILABLE_CURRENT_ENTITY/ZAPTEC_CHARGING_SWITCH_ENTITY above, so it
++# reads 0.0 (not None/unavailable) whenever the charger is idle/disconnected,
++# which _to_float already handles correctly. Confirmed live against Håkan's
++# HA instance 2026-09-30 (sensor.gpn049831_laddeffekt).
++EV_CHARGING_POWER_ENTITY = "sensor.gpn049831_laddeffekt"
++
+ # Fas 4a: same stopgap as Perific/Zaptec above — no Nibe settings tab yet.
+ # Confirmed live against Håkan's HA instance (2026-09 conversation), device
+ # area "Tvättstuga", nibe_heatpump integration via the LilyGO/ESPHome UDP
+@@ -302,6 +312,10 @@ class BESSController:
+         # automation (ev_scheduler.enabled) is itself switched on.
+         self.ev_last_charging_active: bool | None = None
+         self.ev_last_charge_duration_min: float | None = None
++        # Added 2026-09-30, same "always-on car/charger fact" reasoning as
++        # the two fields above — the compact dashboard row's charging-power
++        # ask (see EV_CHARGING_POWER_ENTITY's own comment).
++        self.ev_last_charging_power_kw: float | None = None
+         # Not user-facing — the plug reading from the previous poll tick,
+         # so _poll_ev_charging can pass ev_scheduler.decide() a real
+         # was_plug_connected instead of guessing. See that function's own
+@@ -642,6 +656,9 @@ class BESSController:
+         duration_raw = self._read_raw_entity_state(EV_CHARGE_DURATION_ENTITY)
+         self.ev_last_charge_duration_min = self._to_float(duration_raw)
+ 
++        power_raw = self._read_raw_entity_state(EV_CHARGING_POWER_ENTITY)
++        self.ev_last_charging_power_kw = self._to_float(power_raw)
++
+         ev_settings = self.settings_store.get_section("ev_scheduler")
+         if not ev_settings.get("enabled", False):
+             self.ev_scheduler_last_decision = None
+diff --git a/home_energy_manager/backend/ev_scheduler_api.py b/home_energy_manager/backend/ev_scheduler_api.py
+index da3db67..43defc2 100644
+--- a/home_energy_manager/backend/ev_scheduler_api.py
++++ b/home_energy_manager/backend/ev_scheduler_api.py
+@@ -54,6 +54,12 @@ def _status_payload(bess_controller: Any) -> dict:
+         "estimatedChargeDurationMin": getattr(
+             bess_controller, "ev_last_charge_duration_min", None
+         ),
++        # Added 2026-09-30: the Zaptec charger's own measured output (kW),
++        # same always-on-fact treatment as chargingActive/
++        # estimatedChargeDurationMin above — see app.py's
++        # EV_CHARGING_POWER_ENTITY comment for why this is the charger's
++        # reading, not the car's.
++        "chargingPowerKw": getattr(bess_controller, "ev_last_charging_power_kw", None),
+     }
+ 
+ 
+@@ -67,11 +73,12 @@ async def get_ev_scheduler_status() -> dict:
+     normal state, not an error — same as governor_api.py's equivalent
+     fields.
+ 
+-    ``evSocPercent``/``chargingActive``/``estimatedChargeDurationMin`` are
+-    different: they're the car's own reported facts, read every 30s tick
+-    regardless of whether the scheduler feature is enabled (see app.py's
+-    _poll_ev_charging) — only null before the very first tick since
+-    startup, or if the car itself hasn't reported that field.
++    ``evSocPercent``/``chargingActive``/``estimatedChargeDurationMin``/
++    ``chargingPowerKw`` are different: they're the car's/charger's own
++    reported facts, read every 30s tick regardless of whether the scheduler
++    feature is enabled (see app.py's _poll_ev_charging) — only null before
++    the very first tick since startup, or if the car/charger itself hasn't
++    reported that field.
+     """
+     from app import bess_controller
+ 
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 73b7fd0..a550057 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "Home Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.16"
++version: "0.1.17"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/frontend/src/components/CompactStatusCard.tsx b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+index 500afa3..d3f582d 100644
+--- a/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
++++ b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+@@ -48,6 +48,11 @@ const ICON_COLOR_CLASSES: Record<CompactStatusColor, string> = {
+   purple: 'text-purple-600 dark:text-purple-400',
+ };
+ 
++export interface CompactStatusMetric {
++  label: string;
++  value: string;
++}
++
+ export interface CompactStatusCardProps {
+   title: string;
+   icon: React.ComponentType<{ className?: string }>;
+@@ -57,8 +62,19 @@ export interface CompactStatusCardProps {
+   /** One short line under the headline value — a secondary metric or the
+    * current status, never a list (see module docstring). */
+   statusLine?: string;
+-  /** Error/no-data note, rendered in place of statusLine when present. */
++  /** Error/no-data note, rendered in place of statusLine AND metrics when
++   * present (an unreachable API means none of this tile's data is fresh). */
+   annotation?: string;
++  /**
++   * Added 2026-09-30 for Håkan's "varje ruta bör kunna innehålla betydligt
++   * mer information" ask — a couple of extra label/value facts (e.g. the
++   * governor's configured target, or the EV charger's live power) that
++   * don't fit the single headline+statusLine shape. Rendered as compact
++   * label/value rows, capped at 2 by convention (not enforced here) to
++   * keep tiles from growing tall again — see CompactStatusCard's own
++   * 2026-09-29 aspect-square lesson in the module docstring above.
++   */
++  metrics?: CompactStatusMetric[];
+ }
+ 
+ export default function CompactStatusCard({
+@@ -69,6 +85,7 @@ export default function CompactStatusCard({
+   keyUnit,
+   statusLine,
+   annotation,
++  metrics,
+ }: CompactStatusCardProps) {
+   return (
+     <div className={`border rounded-lg p-2.5 flex flex-col gap-1 ${COLOR_CLASSES[color]}`}>
+@@ -90,9 +107,26 @@ export default function CompactStatusCard({
+         </p>
+         {annotation ? (
+           <p className="text-xs text-red-500 dark:text-red-400 truncate mt-0.5">{annotation}</p>
+-        ) : statusLine ? (
+-          <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">{statusLine}</p>
+-        ) : null}
++        ) : (
++          <>
++            {statusLine && (
++              <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
++                {statusLine}
++              </p>
++            )}
++            {metrics?.map(m => (
++              <p
++                key={m.label}
++                className="flex justify-between gap-2 text-[11px] text-gray-500 dark:text-gray-400 truncate"
++              >
++                <span className="truncate">{m.label}</span>
++                <span className="shrink-0 font-medium text-gray-600 dark:text-gray-300">
++                  {m.value}
++                </span>
++              </p>
++            ))}
++          </>
++        )}
+       </div>
+     </div>
+   );
+diff --git a/home_energy_manager/frontend/src/components/CompactStatusRow.tsx b/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
+index e19fe4a..7cbbc55 100644
+--- a/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
++++ b/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
+@@ -23,6 +23,17 @@ import { heatingStatusColor, heatingStatusLabel } from '../lib/nibeStatusLabels'
+ // since these four are always shown together now — matches the "self-
+ // fetching hook, no props" convention every other status section already
+ // uses, just packaged once instead of four times.
++//
++// Richer-tiles pass (2026-09-30): Håkan asked for each tile to carry more
++// information ("Varje ruta bör kunna innehålla betydligt mer information"),
++// specifically calling out EV-laddning (charging active + power) and
++// Perific One (the effektvakt/governor target), and explicitly excluding
++// Nibe ("förutom nibe-värden förmodar jag" — that tile already just
++// summarizes what the dedicated /nibe page covers in full). Effektvakt got
++// its own small addition (the same target number, for symmetry with
++// Perific One) as the obvious "what else is relevant" call. Implemented via
++// CompactStatusCard's new optional `metrics` prop rather than growing
++// keyValue/statusLine further — see that component's docstring.
+ const GOVERNOR_STATUS_LABELS: Record<string, string> = {
+   within_budget: 'Inom budget',
+   throttling_ev: 'Stryper EV',
+@@ -80,12 +91,35 @@ export default function CompactStatusRow() {
+   const nibeStatus = useNibeStatus();
+   const nibeSavings = useNibeSavings();
+ 
+-  // Perific One — headline totaleffekt (kW), no second line (mirrors the
+-  // full-size card's own lack of extra metrics).
++  // Perific One — headline totaleffekt (kW). Added 2026-09-30, Håkan's
++  // explicit ask ("perific one rutan kan kompletteras med
++  // effektvaktsinställningen"): show the governor's configured target here
++  // too, since Perific One's own reading is exactly what that target is
++  // measured against — plus a derived margin (target minus current draw)
++  // as the obvious next-most-useful number once the target itself is
++  // visible. Both only shown while the governor is actually on; showing a
++  // target for a feature that isn't enforcing anything would be noise.
+   const perificValue =
+     perific.available && perific.powerKw !== null ? perific.powerKw.toFixed(2) : '—';
++  const perificMetrics =
++    governor.enabled && governor.targetKw !== null
++      ? [
++          { label: 'Effektvakt mål', value: `${governor.targetKw.toFixed(1)} kW` },
++          ...(perific.available && perific.powerKw !== null
++            ? [
++                {
++                  label: 'Marginal',
++                  value: `${(governor.targetKw - perific.powerKw).toFixed(1)} kW`,
++                },
++              ]
++            : []),
++        ]
++      : undefined;
+ 
+-  // Effektvakt — headline status, subline uppmätt toppimport.
++  // Effektvakt — headline status, subline uppmätt toppimport, plus the
++  // configured target (added 2026-09-30 alongside Perific One's mirror of
++  // the same number — seeing "Topp: 8.2 kW" without "Mål: 12 kW" next to it
++  // told only half the story).
+   const governorValue = !governor.enabled
+     ? 'Av'
+     : governor.status !== null
+@@ -100,6 +134,10 @@ export default function CompactStatusRow() {
+     governor.enabled && governor.recentPeakKw !== null
+       ? `Topp: ${governor.recentPeakKw.toFixed(1)} kW`
+       : undefined;
++  const governorMetrics =
++    governor.enabled && governor.targetKw !== null
++      ? [{ label: 'Mål', value: `${governor.targetKw.toFixed(1)} kW` }]
++      : undefined;
+ 
+   // EV-laddning — headline Kians nuvarande SOC (alltid när bilen rapporterar
+   // den, oavsett om pris-/sol-schemaläggningen är påslagen — fixat
+@@ -132,6 +170,25 @@ export default function CompactStatusRow() {
+         ? `Tak: ${ev.socCapPercent.toFixed(0)}%`
+         : evStatus
+       : undefined);
++  // Added 2026-09-30, Håkan's explicit ask ("Laddningsrutan för elbil kan
++  // berätta om laddning pågår eller ej och med vilken effekt"): the
++  // charger's own always-on facts (see useEvSchedulerStatus's docstring —
++  // chargingActive/chargingPowerKw are read every tick regardless of
++  // evEnabled), so this shows even while the price/solar automation itself
++  // is off. Distinct from evStatusLine above, which is about the
++  // SCHEDULER's decision/ETA — this metric is about the charger's own
++  // measured reality.
++  const evChargingMetrics = [
++    {
++      label: 'Laddning',
++      value:
++        ev.chargingActive === null
++          ? 'Ingen data'
++          : ev.chargingActive
++            ? `${(ev.chargingPowerKw ?? 0).toFixed(1)} kW`
++            : 'Ej aktiv',
++    },
++  ];
+ 
+   // Nibe — headline uppskattad besparing idag (kr), subline
+   // rumsuppvärmningsstatus. Full breakdown (formel, historik) lives on
+@@ -154,6 +211,7 @@ export default function CompactStatusRow() {
+         color="yellow"
+         keyValue={perificValue}
+         keyUnit="kW"
++        metrics={perificMetrics}
+         annotation={perific.error ? 'Kunde inte nå API:t' : undefined}
+       />
+       <CompactStatusCard
+@@ -162,6 +220,7 @@ export default function CompactStatusRow() {
+         color={governorColor}
+         keyValue={governorValue}
+         statusLine={governorStatusLine}
++        metrics={governorMetrics}
+         annotation={governor.error ? 'Kunde inte nå API:t' : undefined}
+       />
+       <CompactStatusCard
+@@ -170,6 +229,7 @@ export default function CompactStatusRow() {
+         color={evColor}
+         keyValue={evValue}
+         statusLine={evStatusLine}
++        metrics={evChargingMetrics}
+         annotation={ev.error ? 'Kunde inte nå API:t' : undefined}
+       />
+       <CompactStatusCard
+diff --git a/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts b/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts
+index f68d99d..b50adc1 100644
+--- a/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts
++++ b/home_energy_manager/frontend/src/hooks/useEvSchedulerStatus.ts
+@@ -29,6 +29,11 @@ export interface EvSchedulerStatusResponse {
+   /** Kia UVO's own "time to full" estimate (minutes), via whatever charger
+    * is currently connected — null when not charging or not yet reported. */
+   estimatedChargeDurationMin: number | null;
++  /** The Zaptec charger's own measured output power (kW) — 0 when idle/
++   * disconnected, null only before the first poll tick since startup. See
++   * app.py's EV_CHARGING_POWER_ENTITY for why this is the charger's own
++   * reading rather than something derived from the car. */
++  chargingPowerKw: number | null;
+ }
+ 
+ /**
+@@ -52,6 +57,7 @@ export function useEvSchedulerStatus() {
+     reason: null,
+     chargingActive: null,
+     estimatedChargeDurationMin: null,
++    chargingPowerKw: null,
+   });
+   const [error, setError] = useState<string | null>(null);
+   const [requestingOverride, setRequestingOverride] = useState(false);
