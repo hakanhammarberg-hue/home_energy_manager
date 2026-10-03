@@ -55,7 +55,19 @@ export interface CompactStatusMetric {
 
 export interface CompactStatusCardProps {
   title: string;
-  icon: React.ComponentType<{ className?: string }>;
+  /** A lucide icon component. Ignored when `image` is also given — see
+   * `image` below. Optional only so an image-only tile doesn't have to
+   * supply a throwaway icon just to satisfy the type. */
+  icon?: React.ComponentType<{ className?: string }>;
+  /**
+   * Added 2026-10-03, Håkan's ask to put real device photos (his own,
+   * not stock/manufacturer images — see frontend/src/assets/devices/'s
+   * own provenance notes) directly in these tiles instead of a generic
+   * lucide icon, e.g. the Perific One unit's own photo on the Perific
+   * One tile. Takes over the icon's slot (same position/sizing) when
+   * present, so a tile never shows both.
+   */
+  image?: { src: string; alt: string };
   color: CompactStatusColor;
   keyValue: string;
   keyUnit?: string;
@@ -80,6 +92,7 @@ export interface CompactStatusCardProps {
 export default function CompactStatusCard({
   title,
   icon: Icon,
+  image,
   color,
   keyValue,
   keyUnit,
@@ -90,7 +103,15 @@ export default function CompactStatusCard({
   return (
     <div className={`border rounded-lg p-2.5 flex flex-col gap-1 ${COLOR_CLASSES[color]}`}>
       <div className="flex items-center min-w-0">
-        <Icon className={`h-4 w-4 ${ICON_COLOR_CLASSES[color]} mr-1.5 shrink-0`} />
+        {image ? (
+          <img
+            src={image.src}
+            alt={image.alt}
+            className="h-5 w-5 rounded-sm object-cover mr-1.5 shrink-0 bg-white"
+          />
+        ) : Icon ? (
+          <Icon className={`h-4 w-4 ${ICON_COLOR_CLASSES[color]} mr-1.5 shrink-0`} />
+        ) : null}
         <h3 className="text-xs font-medium text-gray-600 dark:text-gray-400 truncate">
           {title}
         </h3>

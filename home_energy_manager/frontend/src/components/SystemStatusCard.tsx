@@ -5,15 +5,18 @@ import { FormattedValue, ControlModel } from '../types';
 import { DashboardResponse } from '../api/scheduleApi';
 import { getIntent, isCurtailed } from '../utils/intent';
 import { formatFixed } from '../utils/format';
-import { 
-  DollarSign, 
-  Battery, 
+import {
+  DollarSign,
+  Battery,
   TrendingUp,
   TrendingDown,
   AlertTriangle,
   Zap,
   Home
 } from 'lucide-react';
+import solarPanelsImage from '../assets/devices/solar-panels.jpg';
+import batteryImage from '../assets/devices/battery.jpg';
+import inverterImage from '../assets/devices/inverter.jpg';
 
 
 
@@ -38,6 +41,15 @@ export interface StatusCardProps {
   className?: string;
   systemMode?: string;
   headerRight?: React.ReactNode;
+  /**
+   * Added 2026-10-03, Håkan's ask to show his own equipment photos (solar
+   * panels, battery, Growatt inverter — see frontend/src/assets/devices/'s
+   * own provenance notes) directly inside the "Home Power" card rather
+   * than in a separate gallery row ("Lägg dem istället här: ... inuti
+   * rutan för home power"). A small overlapping thumbnail stack next to
+   * the title, purely decorative — no live data attached.
+   */
+  images?: { src: string; alt: string }[];
 }
 
 export const StatusCard: React.FC<StatusCardProps> = ({
@@ -51,7 +63,8 @@ export const StatusCard: React.FC<StatusCardProps> = ({
   metrics,
   className = "",
   systemMode,
-  headerRight
+  headerRight,
+  images
 }) => {
   const colorClasses = {
     blue: 'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800',
@@ -91,7 +104,21 @@ export const StatusCard: React.FC<StatusCardProps> = ({
           <Icon className={`h-6 w-6 ${iconColorClasses[color]} mr-3`} />
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h3>
         </div>
-        {headerRight}
+        <div className="flex items-center gap-3">
+          {images && images.length > 0 && (
+            <div className="flex items-center -space-x-2">
+              {images.map((img) => (
+                <img
+                  key={img.src}
+                  src={img.src}
+                  alt={img.alt}
+                  className="h-8 w-8 rounded-full object-cover border-2 border-white dark:border-gray-800 shrink-0 bg-white"
+                />
+              ))}
+            </div>
+          )}
+          {headerRight}
+        </div>
       </div>
 
       {/*
@@ -405,6 +432,11 @@ const SystemStatusCard: React.FC<SystemStatusCardProps> = ({ className = "", sys
       title: "Home Power",
       icon: Zap,
       color: "blue" as const,
+      images: [
+        { src: solarPanelsImage, alt: 'Solpaneler' },
+        { src: batteryImage, alt: 'Batteri' },
+        { src: inverterImage, alt: 'Growatt växelriktare' },
+      ],
       keyMetric: "Solar Generation",
       keyValue: statusData.realTimePower?.solarPower?.text || '0 W',
       keyUnit: "",
@@ -560,6 +592,7 @@ const SystemStatusCard: React.FC<SystemStatusCardProps> = ({ className = "", sys
           keyAnnotation={card.keyAnnotation}
           metrics={card.metrics}
           systemMode={systemMode}
+          images={'images' in card ? card.images : undefined}
         />
       ))}
     </div>

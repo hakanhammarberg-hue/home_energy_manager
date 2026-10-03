@@ -99,3 +99,44 @@ export function dhwStatusColor(status: string | null): StatusColor {
   if (status === null) return 'blue';
   return DHW_STATUS_COLORS[status as DhwStatus] ?? 'blue';
 }
+
+// Added 2026-10-03, Håkan's ask for the compact dashboard Nibe tile
+// ("Visa antingen Varmvatten, uppvärmning hus, avfrostning eller
+// inaktiv"): a plain-language "what's physically happening right now"
+// label, independent of the HEATING_STATUS_LABELS above (which describe
+// the DECISION ENGINE's reasoning — "extra värme, billig timme" — not
+// the pump's actual physical activity). Derived from the pump's own Prio
+// register (sensor.prio_43086 — Off/Hot Water/Heat/Pool, see
+// NibeLiveCard.tsx's docstring), with a defrost override.
+//
+// Deliberately a SEPARATE map from NibeLiveCard.tsx's own local
+// PRIO_LABELS rather than a shared refactor: that card's existing labels
+// ("Värme") are already live and unrelated to this ask, and changing them
+// to match the wording requested here ("Uppvärmning hus") would alter
+// that page's established display without being asked.
+const NIBE_ACTIVITY_LABELS: Record<string, string> = {
+  OFF: 'Inaktiv',
+  'Hot Water': 'Varmvatten',
+  Heat: 'Uppvärmning hus',
+  Pool: 'Pool',
+};
+
+// compressor_state_ep14_43427 is a free-text register whose documented
+// values include a "Defrosting" state per the community Modbus register
+// tables (anerdins/nibepi) — NOT YET CONFIRMED against Håkan's own live
+// data (his pump hadn't been observed defrosting at the time this was
+// written). Matched case-insensitively by substring so the exact wording
+// his F750 actually reports doesn't have to match precisely; if it turns
+// out to use different wording entirely, this just falls through to the
+// Prio-based label instead of breaking anything — worth revisiting once a
+// real defrost cycle has been seen live.
+function isDefrosting(compressorState: string | null): boolean {
+  if (!compressorState) return false;
+  return compressorState.toLowerCase().includes('defrost');
+}
+
+export function nibeActivityLabel(prio: string | null, compressorState: string | null): string {
+  if (isDefrosting(compressorState)) return 'Avfrostning';
+  if (prio === null) return 'Inaktiv';
+  return NIBE_ACTIVITY_LABELS[prio] ?? prio;
+}
