@@ -5,6 +5,7 @@ import { BatteryModeTimeline } from '../components/BatteryModeTimeline';
 import { BatterySettings, ElectricitySettings } from '../types';
 import { Clock, AlertCircle } from 'lucide-react';
 import EnergyFlowCards from '../components/EnergyFlowCards';
+import DeviceGallery from '../components/DeviceGallery';
 import SystemStatusCard from '../components/SystemStatusCard';
 import CompactStatusRow from '../components/CompactStatusRow';
 import BatterySocRangeCard from '../components/BatterySocRangeCard';
@@ -378,6 +379,18 @@ export default function DashboardPage({
       {/* Main Content */}
       {hasValidData ? (
         <>
+          {/* Mina enheter — Håkan's own photos of his actually-installed
+              equipment (2026-10-03, "Jag vill ha in bilderna på apparaterna
+              i home assistant managers dashboard"). Purely visual, no live
+              data, so it's shown even while other sections below are
+              loading/erroring — see DeviceGallery.tsx's docstring. */}
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Mina enheter</h2>
+              <DeviceGallery />
+            </div>
+          </div>
+
           {/* System Overview Cards - New section at the top */}
           <div className="space-y-6">
             <div>
