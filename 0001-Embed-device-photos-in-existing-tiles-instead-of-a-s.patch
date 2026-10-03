@@ -1,0 +1,690 @@
+From 6fd071905676c7ae8a83ab3ccab56a821d0da093 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 3 Oct 2026 18:52:21 +0000
+Subject: [PATCH] Embed device photos in existing tiles instead of a separate
+ gallery
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Removes the "Mina enheter" gallery row and distributes the same photos
+across the dashboard's existing cards per Håkan's restructuring request:
+
+- Home Power card: solar panel, battery and Growatt inverter photos as a
+  thumbnail stack next to the title.
+- Perific One tile: Perific One's own device photo (previously misfiled
+  as "ev-charger.jpg" / assumed to be the Zaptec charger - corrected per
+  Håkan's explicit feedback). Also absorbs the old "Effektvakt" tile's
+  governor status/metrics ("Lägg status för effektvakt i perific rutan").
+- New "Zaptec Go 2" tile (replacing the old Effektvakt slot): the actual
+  charger's on/off state and current charging power, moved from the old
+  EV-laddning tile. Generic icon - no device-specific photo exists since
+  that photo turned out to be Perific One's.
+- "Elfordon" tile (renamed from "EV-laddning"): EV3 photo, state of
+  charge only.
+- Nibe tile: F750 photo, plus a new physical-activity status line
+  (Varmvatten/Uppvärmning hus/Avfrostning/Inaktiv) derived from the live
+  Prio register and a defrost override, separate from the existing
+  decision-engine status label shown on the dedicated /nibe page.
+
+v0.1.20.
+---
+ home_energy_manager/config.yaml               |   2 +-
+ .../src/assets/devices/{ev.jpg => ev3.jpg}    | Bin
+ .../{ev-charger.jpg => perific-one.jpg}       | Bin
+ .../src/components/CompactStatusCard.tsx      |  25 +-
+ .../src/components/CompactStatusRow.tsx       | 271 ++++++------------
+ .../frontend/src/components/DeviceGallery.tsx |  60 ----
+ .../src/components/SystemStatusCard.tsx       |  43 ++-
+ .../frontend/src/lib/nibeStatusLabels.ts      |  41 +++
+ .../frontend/src/pages/DashboardPage.tsx      |  13 -
+ 9 files changed, 190 insertions(+), 265 deletions(-)
+ rename home_energy_manager/frontend/src/assets/devices/{ev.jpg => ev3.jpg} (100%)
+ rename home_energy_manager/frontend/src/assets/devices/{ev-charger.jpg => perific-one.jpg} (100%)
+ delete mode 100644 home_energy_manager/frontend/src/components/DeviceGallery.tsx
+
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index c10d0ce..72cadae 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "H.E.M. - Hammarberg Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.19"
++version: "0.1.20"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/frontend/src/assets/devices/ev.jpg b/home_energy_manager/frontend/src/assets/devices/ev3.jpg
+similarity index 100%
+rename from home_energy_manager/frontend/src/assets/devices/ev.jpg
+rename to home_energy_manager/frontend/src/assets/devices/ev3.jpg
+diff --git a/home_energy_manager/frontend/src/assets/devices/ev-charger.jpg b/home_energy_manager/frontend/src/assets/devices/perific-one.jpg
+similarity index 100%
+rename from home_energy_manager/frontend/src/assets/devices/ev-charger.jpg
+rename to home_energy_manager/frontend/src/assets/devices/perific-one.jpg
+diff --git a/home_energy_manager/frontend/src/components/CompactStatusCard.tsx b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+index d3f582d..ad8e864 100644
+--- a/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
++++ b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+@@ -55,7 +55,19 @@ export interface CompactStatusMetric {
+ 
+ export interface CompactStatusCardProps {
+   title: string;
+-  icon: React.ComponentType<{ className?: string }>;
++  /** A lucide icon component. Ignored when `image` is also given — see
++   * `image` below. Optional only so an image-only tile doesn't have to
++   * supply a throwaway icon just to satisfy the type. */
++  icon?: React.ComponentType<{ className?: string }>;
++  /**
++   * Added 2026-10-03, Håkan's ask to put real device photos (his own,
++   * not stock/manufacturer images — see frontend/src/assets/devices/'s
++   * own provenance notes) directly in these tiles instead of a generic
++   * lucide icon, e.g. the Perific One unit's own photo on the Perific
++   * One tile. Takes over the icon's slot (same position/sizing) when
++   * present, so a tile never shows both.
++   */
++  image?: { src: string; alt: string };
+   color: CompactStatusColor;
+   keyValue: string;
+   keyUnit?: string;
+@@ -80,6 +92,7 @@ export interface CompactStatusCardProps {
+ export default function CompactStatusCard({
+   title,
+   icon: Icon,
++  image,
+   color,
+   keyValue,
+   keyUnit,
+@@ -90,7 +103,15 @@ export default function CompactStatusCard({
+   return (
+     <div className={`border rounded-lg p-2.5 flex flex-col gap-1 ${COLOR_CLASSES[color]}`}>
+       <div className="flex items-center min-w-0">
+-        <Icon className={`h-4 w-4 ${ICON_COLOR_CLASSES[color]} mr-1.5 shrink-0`} />
++        {image ? (
++          <img
++            src={image.src}
++            alt={image.alt}
++            className="h-5 w-5 rounded-sm object-cover mr-1.5 shrink-0 bg-white"
++          />
++        ) : Icon ? (
++          <Icon className={`h-4 w-4 ${ICON_COLOR_CLASSES[color]} mr-1.5 shrink-0`} />
++        ) : null}
+         <h3 className="text-xs font-medium text-gray-600 dark:text-gray-400 truncate">
+           {title}
+         </h3>
+diff --git a/home_energy_manager/frontend/src/components/CompactStatusRow.tsx b/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
+index 7cbbc55..2178070 100644
+--- a/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
++++ b/home_energy_manager/frontend/src/components/CompactStatusRow.tsx
+@@ -1,39 +1,47 @@
+-import { Activity, Car, Flame, Zap } from 'lucide-react';
++import { Zap } from 'lucide-react';
+ import CompactStatusCard from './CompactStatusCard';
+ import { usePerificPower } from '../hooks/usePerificPower';
+ import { useGovernorStatus } from '../hooks/useGovernorStatus';
+ import { useEvSchedulerStatus } from '../hooks/useEvSchedulerStatus';
+ import { useNibeStatus } from '../hooks/useNibeStatus';
+ import { useNibeSavings } from '../hooks/useNibeSavings';
+-import { heatingStatusColor, heatingStatusLabel } from '../lib/nibeStatusLabels';
++import { useNibeLive } from '../hooks/useNibeLive';
++import { heatingStatusColor, nibeActivityLabel } from '../lib/nibeStatusLabels';
++import perificOneImage from '../assets/devices/perific-one.jpg';
++import ev3Image from '../assets/devices/ev3.jpg';
++import heatPumpImage from '../assets/devices/heat-pump.jpg';
+ 
+-// Dashboard-compaction phase (2026-09-28): Perific One, Effektvakt,
+-// EV-laddning and Nibe side by side in one compact row — Håkan's explicit
+-// ask ("effektvakt, perific one ev laddning och nibe ska få plats bredvid
+-// varandra"). Replaces those four sections' previous full-width StatusCard
+-// rendering on the Dashboard (PerificPowerCard/GovernorStatusCard/
+-// EvSchedulerStatusCard stay defined but are no longer mounted here; the
+-// old NibeStatusCard was retired outright — its "Lyxläge varmvatten" toggle
+-// moved to NibeControls.tsx on the /nibe page, and its status display is
+-// superseded by this row plus NibeLiveCard). Full Nibe detail now lives
+-// solely on the dedicated /nibe page (NibeDriftPage), per Håkan's "övriga
+-// nibe-värden behövs bara på nibe-sidan".
++// Dashboard-compaction phase (2026-09-28): four small square tiles in a
++// row — see CompactStatusCard.tsx's own docstring for the layout history
++// and claude/dashboard-compaction-and-nibe-savings-forslag.md's "Del 1" for
++// the research behind it.
+ //
+-// One row component rather than four separate default-exported cards,
+-// since these four are always shown together now — matches the "self-
+-// fetching hook, no props" convention every other status section already
+-// uses, just packaged once instead of four times.
+-//
+-// Richer-tiles pass (2026-09-30): Håkan asked for each tile to carry more
+-// information ("Varje ruta bör kunna innehålla betydligt mer information"),
+-// specifically calling out EV-laddning (charging active + power) and
+-// Perific One (the effektvakt/governor target), and explicitly excluding
+-// Nibe ("förutom nibe-värden förmodar jag" — that tile already just
+-// summarizes what the dedicated /nibe page covers in full). Effektvakt got
+-// its own small addition (the same target number, for symmetry with
+-// Perific One) as the obvious "what else is relevant" call. Implemented via
+-// CompactStatusCard's new optional `metrics` prop rather than growing
+-// keyValue/statusLine further — see that component's docstring.
++// Restructured 2026-10-03 per Håkan's ask to put his own device photos
++// (frontend/src/assets/devices/ — confirmed his own, not manufacturer
++// stock images) directly on these tiles and to regroup what each tile
++// shows:
++//   - "Perific One": Perific One's own device photo (the white box with
++//     the "Z"-like logo — NOT the Zaptec charger, despite the visual
++//     similarity; Håkan corrected this assumption explicitly). Keeps its
++//     own live power reading as the headline value, and now ALSO carries
++//     the Effektvakt (governor) status/metrics that used to have their
++//     own tile — "Lägg status för effektvakt i perific rutan."
++//   - "Zaptec Go 2" (replaces the old "Effektvakt" tile slot): the actual
++//     EV charger's on/off + current charging power, moved here from the
++//     old "EV-laddning" tile. No device-specific photo exists for this
++//     charger (its photo turned out to be Perific One's), so it keeps a
++//     generic icon.
++//   - "Elfordon" (renamed from "EV-laddning"): the EV3's own photo, and
++//     ONLY the state of charge — "Sätt bara state of charge där."
++//   - "Nibe": the F750's own photo, keeping its kr-idag savings headline,
++//     but with a NEW statusLine showing the pump's actual physical
++//     activity (Varmvatten/Uppvärmning hus/Avfrostning/Inaktiv) via
++//     nibeActivityLabel() — deliberately separate from the old
++//     heatingStatusLabel (decision-engine reasoning like "extra värme,
++//     billig timme"), which is still shown in full on the dedicated /nibe
++//     page. Color coding is left on the decision-engine status (unchanged)
++//     since Håkan only asked to change the status wording, not the color.
++
+ const GOVERNOR_STATUS_LABELS: Record<string, string> = {
+   within_budget: 'Inom budget',
+   throttling_ev: 'Stryper EV',
+@@ -46,202 +54,97 @@ const GOVERNOR_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red'
+   no_data: 'red',
+ };
+ 
+-const EV_STATUS_LABELS: Record<string, string> = {
+-  no_data: 'Ingen data',
+-  not_plugged_in: 'Ej inkopplad',
+-  blocked_battery_discharging: 'Blockerad',
+-  blocked_above_cap: 'Över SOC-tak',
+-  allowed_override: 'Laddar (override)',
+-  allowed_solar_surplus: 'Laddar (sol)',
+-  allowed_low_price: 'Laddar (lågpris)',
+-};
+-
+-const EV_STATUS_COLORS: Record<string, 'blue' | 'green' | 'yellow' | 'red' | 'purple'> = {
+-  no_data: 'red',
+-  not_plugged_in: 'blue',
+-  blocked_battery_discharging: 'yellow',
+-  blocked_above_cap: 'yellow',
+-  allowed_override: 'green',
+-  allowed_solar_surplus: 'green',
+-  allowed_low_price: 'green',
+-};
+-
+-// Added 2026-09-29 for Håkan's "när beräknas batteriet nå 100%" ask.
+-// Kia UVO's own "Estimated Charge Duration" (minutes, via whatever charger
+-// is currently connected) already accounts for charge-curve tapering near
+-// full — turned into a clock-time ETA here rather than re-derived from
+-// power/capacity, which would be a worse estimate than the car's own BMS.
+-// Only shown while the car itself reports actively charging; a stale
+-// duration figure while charging is paused/finished would be misleading.
+-function formatChargeEta(
+-  chargingActive: boolean | null,
+-  durationMin: number | null
+-): string | undefined {
+-  if (!chargingActive || durationMin === null) return undefined;
+-  const eta = new Date(Date.now() + durationMin * 60_000);
+-  const hh = eta.getHours().toString().padStart(2, '0');
+-  const mm = eta.getMinutes().toString().padStart(2, '0');
+-  return `Fulladdad ~${hh}:${mm}`;
+-}
+-
+ export default function CompactStatusRow() {
+   const perific = usePerificPower();
+   const governor = useGovernorStatus();
+   const ev = useEvSchedulerStatus();
+   const nibeStatus = useNibeStatus();
+   const nibeSavings = useNibeSavings();
++  const nibeLive = useNibeLive();
+ 
+-  // Perific One — headline totaleffekt (kW). Added 2026-09-30, Håkan's
+-  // explicit ask ("perific one rutan kan kompletteras med
+-  // effektvaktsinställningen"): show the governor's configured target here
+-  // too, since Perific One's own reading is exactly what that target is
+-  // measured against — plus a derived margin (target minus current draw)
+-  // as the obvious next-most-useful number once the target itself is
+-  // visible. Both only shown while the governor is actually on; showing a
+-  // target for a feature that isn't enforcing anything would be noise.
++  // --- Perific One (own power reading + Effektvakt/governor status) ---
+   const perificValue =
+     perific.available && perific.powerKw !== null ? perific.powerKw.toFixed(2) : '—';
+-  const perificMetrics =
+-    governor.enabled && governor.targetKw !== null
+-      ? [
+-          { label: 'Effektvakt mål', value: `${governor.targetKw.toFixed(1)} kW` },
+-          ...(perific.available && perific.powerKw !== null
+-            ? [
+-                {
+-                  label: 'Marginal',
+-                  value: `${(governor.targetKw - perific.powerKw).toFixed(1)} kW`,
+-                },
+-              ]
+-            : []),
+-        ]
+-      : undefined;
+ 
+-  // Effektvakt — headline status, subline uppmätt toppimport, plus the
+-  // configured target (added 2026-09-30 alongside Perific One's mirror of
+-  // the same number — seeing "Topp: 8.2 kW" without "Mål: 12 kW" next to it
+-  // told only half the story).
+-  const governorValue = !governor.enabled
+-    ? 'Av'
++  const governorStatusLine = !governor.enabled
++    ? 'Effektvakt av'
+     : governor.status !== null
+       ? (GOVERNOR_STATUS_LABELS[governor.status] ?? governor.status)
+       : 'Väntar…';
+-  const governorColor = !governor.enabled
+-    ? 'blue'
++  const governorColor: 'blue' | 'green' | 'yellow' | 'red' | 'purple' = !governor.enabled
++    ? 'yellow'
+     : governor.status !== null
+-      ? (GOVERNOR_STATUS_COLORS[governor.status] ?? 'blue')
+-      : 'blue';
+-  const governorStatusLine =
+-    governor.enabled && governor.recentPeakKw !== null
+-      ? `Topp: ${governor.recentPeakKw.toFixed(1)} kW`
+-      : undefined;
+-  const governorMetrics =
++      ? (GOVERNOR_STATUS_COLORS[governor.status] ?? 'yellow')
++      : 'yellow';
++  const perificMetrics =
+     governor.enabled && governor.targetKw !== null
+-      ? [{ label: 'Mål', value: `${governor.targetKw.toFixed(1)} kW` }]
++      ? [
++          { label: 'Mål', value: `${governor.targetKw.toFixed(1)} kW` },
++          ...(governor.recentPeakKw !== null
++            ? [{ label: 'Topp', value: `${governor.recentPeakKw.toFixed(1)} kW` }]
++            : []),
++        ]
+       : undefined;
++  const perificAnnotation =
++    perific.error || governor.error ? 'Kunde inte nå API:t' : undefined;
+ 
+-  // EV-laddning — headline Kians nuvarande SOC (alltid när bilen rapporterar
+-  // den, oavsett om pris-/sol-schemaläggningen är påslagen — fixat
+-  // 2026-09-29: det är bilens egna rapporterade fakta, inte ett
+-  // schemaläggarbeslut, se app.py:s _poll_ev_charging). Sublinjen visar en
+-  // "Fulladdad ~HH:MM"-uppskattning medan bilen faktiskt laddar, annars
+-  // schemaläggarens status/SOC-tak när den är påslagen.
+-  const evEnabled = ev.enabled;
+-  const evStatus = ev.status === 'allowed_below_cap'
+-    ? (ev.chargingAllowed ? 'Laddar (billigt)' : 'Väntar')
+-    : ev.status !== null
+-      ? (EV_STATUS_LABELS[ev.status] ?? ev.status)
+-      : 'Väntar…';
+-  const evColor: 'blue' | 'green' | 'yellow' | 'red' | 'purple' = ev.chargingActive
+-    ? 'green'
+-    : !evEnabled
+-      ? 'blue'
+-      : ev.status === 'allowed_below_cap'
+-        ? (ev.chargingAllowed ? 'green' : 'blue')
+-        : ev.status !== null
+-          ? (EV_STATUS_COLORS[ev.status] ?? 'blue')
+-          : 'blue';
+-  const evValue =
+-    ev.evSocPercent !== null ? `${ev.evSocPercent.toFixed(0)}%` : evEnabled ? evStatus : '—';
+-  const evEtaLabel = formatChargeEta(ev.chargingActive, ev.estimatedChargeDurationMin);
+-  const evStatusLine =
+-    evEtaLabel ??
+-    (evEnabled
+-      ? ev.socCapPercent !== null
+-        ? `Tak: ${ev.socCapPercent.toFixed(0)}%`
+-        : evStatus
+-      : undefined);
+-  // Added 2026-09-30, Håkan's explicit ask ("Laddningsrutan för elbil kan
+-  // berätta om laddning pågår eller ej och med vilken effekt"): the
+-  // charger's own always-on facts (see useEvSchedulerStatus's docstring —
+-  // chargingActive/chargingPowerKw are read every tick regardless of
+-  // evEnabled), so this shows even while the price/solar automation itself
+-  // is off. Distinct from evStatusLine above, which is about the
+-  // SCHEDULER's decision/ETA — this metric is about the charger's own
+-  // measured reality.
+-  const evChargingMetrics = [
+-    {
+-      label: 'Laddning',
+-      value:
+-        ev.chargingActive === null
+-          ? 'Ingen data'
+-          : ev.chargingActive
+-            ? `${(ev.chargingPowerKw ?? 0).toFixed(1)} kW`
+-            : 'Ej aktiv',
+-    },
+-  ];
++  // --- Zaptec Go 2 (actual charger: on/off + current charging power) ---
++  const chargingActive = ev.chargingActive;
++  const zaptecValue =
++    chargingActive === null ? 'Ingen data' : chargingActive ? 'Laddar' : 'Av';
++  const zaptecColor: 'blue' | 'green' | 'yellow' | 'red' | 'purple' =
++    chargingActive === null ? 'red' : chargingActive ? 'green' : 'blue';
++  const zaptecMetrics = chargingActive
++    ? [{ label: 'Effekt', value: `${(ev.chargingPowerKw ?? 0).toFixed(1)} kW` }]
++    : undefined;
++
++  // --- Elfordon (EV3 photo, state of charge only) ---
++  const evSocValue = ev.evSocPercent !== null ? `${ev.evSocPercent.toFixed(0)}%` : '—';
+ 
+-  // Nibe — headline uppskattad besparing idag (kr), subline
+-  // rumsuppvärmningsstatus. Full breakdown (formel, historik) lives on
+-  // /nibe only, per Håkan's "övriga nibe-värden behövs bara på nibe-sidan".
+-  const nibeValue = !nibeStatus.enabled
+-    ? 'Av'
+-    : `${nibeSavings.totalSavingsKr.toFixed(1)}`;
+-  const nibeColor = !nibeStatus.enabled
+-    ? 'blue'
+-    : heatingStatusColor(nibeStatus.heating.status);
++  // --- Nibe (heat pump photo, savings + live physical-activity status) ---
++  const nibeValue = !nibeStatus.enabled ? 'Av' : `${nibeSavings.totalSavingsKr.toFixed(1)}`;
++  const nibeColor = !nibeStatus.enabled ? 'blue' : heatingStatusColor(nibeStatus.heating.status);
+   const nibeStatusLine = nibeStatus.enabled
+-    ? heatingStatusLabel(nibeStatus.heating.status)
++    ? nibeActivityLabel(nibeLive.live.prio, nibeLive.live.compressorState)
+     : undefined;
++  const nibeAnnotation =
++    nibeStatus.error || nibeSavings.error || nibeLive.error ? 'Kunde inte nå API:t' : undefined;
+ 
+   return (
+     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+       <CompactStatusCard
+         title="Perific One"
+-        icon={Zap}
+-        color="yellow"
++        image={{ src: perificOneImage, alt: 'Perific One' }}
++        color={governorColor}
+         keyValue={perificValue}
+         keyUnit="kW"
++        statusLine={governorStatusLine}
+         metrics={perificMetrics}
+-        annotation={perific.error ? 'Kunde inte nå API:t' : undefined}
++        annotation={perificAnnotation}
+       />
+       <CompactStatusCard
+-        title="Effektvakt"
+-        icon={Activity}
+-        color={governorColor}
+-        keyValue={governorValue}
+-        statusLine={governorStatusLine}
+-        metrics={governorMetrics}
+-        annotation={governor.error ? 'Kunde inte nå API:t' : undefined}
++        title="Zaptec Go 2"
++        icon={Zap}
++        color={zaptecColor}
++        keyValue={zaptecValue}
++        metrics={zaptecMetrics}
++        annotation={ev.error ? 'Kunde inte nå API:t' : undefined}
+       />
+       <CompactStatusCard
+-        title="EV-laddning"
+-        icon={Car}
+-        color={evColor}
+-        keyValue={evValue}
+-        statusLine={evStatusLine}
+-        metrics={evChargingMetrics}
++        title="Elfordon"
++        image={{ src: ev3Image, alt: 'Elfordon (EV3)' }}
++        color="blue"
++        keyValue={evSocValue}
+         annotation={ev.error ? 'Kunde inte nå API:t' : undefined}
+       />
+       <CompactStatusCard
+         title="Nibe"
+-        icon={Flame}
++        image={{ src: heatPumpImage, alt: 'Nibe F750' }}
+         color={nibeColor}
+         keyValue={nibeValue}
+         keyUnit={nibeStatus.enabled ? 'kr idag' : undefined}
+         statusLine={nibeStatusLine}
+-        annotation={
+-          nibeStatus.error || nibeSavings.error ? 'Kunde inte nå API:t' : undefined
+-        }
++        annotation={nibeAnnotation}
+       />
+     </div>
+   );
+diff --git a/home_energy_manager/frontend/src/components/DeviceGallery.tsx b/home_energy_manager/frontend/src/components/DeviceGallery.tsx
+deleted file mode 100644
+index a199972..0000000
+--- a/home_energy_manager/frontend/src/components/DeviceGallery.tsx
++++ /dev/null
+@@ -1,60 +0,0 @@
+-// Added 2026-10-03, Håkan's explicit ask ("Jag vill ha in bilderna på
+-// apparaterna i home assistant managers dashboard"). All six images are
+-// Håkan's own photos of his own installed equipment (confirmed by him
+-// after I flagged that their white/studio backgrounds looked like
+-// manufacturer product shots — he confirmed they are genuinely his own,
+-// 2026-10-03), so there's no copyright concern importing them straight
+-// into the bundle like the house photo in App.tsx's header.
+-//
+-// A simple photo + label grid rather than wiring these into
+-// SystemStatusCard/CompactStatusRow: those cards are already dense with
+-// live numbers, and cramming a photo into a 4px-icon-sized tile would
+-// fight their whole "compact" point (see CompactStatusCard's own
+-// docstring). This is purely a visual "here's what's actually in my
+-// house" section — no live data, so no hooks/polling needed.
+-import solarPanelsImage from '../assets/devices/solar-panels.jpg';
+-import batteryImage from '../assets/devices/battery.jpg';
+-import inverterImage from '../assets/devices/inverter.jpg';
+-import heatPumpImage from '../assets/devices/heat-pump.jpg';
+-import evImage from '../assets/devices/ev.jpg';
+-import evChargerImage from '../assets/devices/ev-charger.jpg';
+-
+-interface Device {
+-  name: string;
+-  subtitle: string;
+-  image: string;
+-}
+-
+-const DEVICES: Device[] = [
+-  { name: 'Solceller', subtitle: 'Perific One', image: solarPanelsImage },
+-  { name: 'Batteri', subtitle: 'Growatt', image: batteryImage },
+-  { name: 'Växelriktare', subtitle: 'Growatt', image: inverterImage },
+-  { name: 'Nibe F750', subtitle: 'Värmepump', image: heatPumpImage },
+-  { name: 'Elbil', subtitle: 'Kia', image: evImage },
+-  { name: 'Laddbox', subtitle: 'Zaptec', image: evChargerImage },
+-];
+-
+-export default function DeviceGallery() {
+-  return (
+-    <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+-      {DEVICES.map((device) => (
+-        <div
+-          key={device.name}
+-          className="flex flex-col items-center gap-1.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-2"
+-        >
+-          <img
+-            src={device.image}
+-            alt={device.name}
+-            className="h-16 w-16 sm:h-20 sm:w-20 rounded-md object-contain bg-white"
+-          />
+-          <p className="text-xs font-medium text-gray-900 dark:text-gray-100 text-center leading-tight">
+-            {device.name}
+-          </p>
+-          <p className="text-[11px] text-gray-500 dark:text-gray-400 text-center leading-tight">
+-            {device.subtitle}
+-          </p>
+-        </div>
+-      ))}
+-    </div>
+-  );
+-}
+diff --git a/home_energy_manager/frontend/src/components/SystemStatusCard.tsx b/home_energy_manager/frontend/src/components/SystemStatusCard.tsx
+index 61ffe7d..1b63c9f 100644
+--- a/home_energy_manager/frontend/src/components/SystemStatusCard.tsx
++++ b/home_energy_manager/frontend/src/components/SystemStatusCard.tsx
+@@ -5,15 +5,18 @@ import { FormattedValue, ControlModel } from '../types';
+ import { DashboardResponse } from '../api/scheduleApi';
+ import { getIntent, isCurtailed } from '../utils/intent';
+ import { formatFixed } from '../utils/format';
+-import { 
+-  DollarSign, 
+-  Battery, 
++import {
++  DollarSign,
++  Battery,
+   TrendingUp,
+   TrendingDown,
+   AlertTriangle,
+   Zap,
+   Home
+ } from 'lucide-react';
++import solarPanelsImage from '../assets/devices/solar-panels.jpg';
++import batteryImage from '../assets/devices/battery.jpg';
++import inverterImage from '../assets/devices/inverter.jpg';
+ 
+ 
+ 
+@@ -38,6 +41,15 @@ export interface StatusCardProps {
+   className?: string;
+   systemMode?: string;
+   headerRight?: React.ReactNode;
++  /**
++   * Added 2026-10-03, Håkan's ask to show his own equipment photos (solar
++   * panels, battery, Growatt inverter — see frontend/src/assets/devices/'s
++   * own provenance notes) directly inside the "Home Power" card rather
++   * than in a separate gallery row ("Lägg dem istället här: ... inuti
++   * rutan för home power"). A small overlapping thumbnail stack next to
++   * the title, purely decorative — no live data attached.
++   */
++  images?: { src: string; alt: string }[];
+ }
+ 
+ export const StatusCard: React.FC<StatusCardProps> = ({
+@@ -51,7 +63,8 @@ export const StatusCard: React.FC<StatusCardProps> = ({
+   metrics,
+   className = "",
+   systemMode,
+-  headerRight
++  headerRight,
++  images
+ }) => {
+   const colorClasses = {
+     blue: 'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800',
+@@ -91,7 +104,21 @@ export const StatusCard: React.FC<StatusCardProps> = ({
+           <Icon className={`h-6 w-6 ${iconColorClasses[color]} mr-3`} />
+           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h3>
+         </div>
+-        {headerRight}
++        <div className="flex items-center gap-3">
++          {images && images.length > 0 && (
++            <div className="flex items-center -space-x-2">
++              {images.map((img) => (
++                <img
++                  key={img.src}
++                  src={img.src}
++                  alt={img.alt}
++                  className="h-8 w-8 rounded-full object-cover border-2 border-white dark:border-gray-800 shrink-0 bg-white"
++                />
++              ))}
++            </div>
++          )}
++          {headerRight}
++        </div>
+       </div>
+ 
+       {/*
+@@ -405,6 +432,11 @@ const SystemStatusCard: React.FC<SystemStatusCardProps> = ({ className = "", sys
+       title: "Home Power",
+       icon: Zap,
+       color: "blue" as const,
++      images: [
++        { src: solarPanelsImage, alt: 'Solpaneler' },
++        { src: batteryImage, alt: 'Batteri' },
++        { src: inverterImage, alt: 'Growatt växelriktare' },
++      ],
+       keyMetric: "Solar Generation",
+       keyValue: statusData.realTimePower?.solarPower?.text || '0 W',
+       keyUnit: "",
+@@ -560,6 +592,7 @@ const SystemStatusCard: React.FC<SystemStatusCardProps> = ({ className = "", sys
+           keyAnnotation={card.keyAnnotation}
+           metrics={card.metrics}
+           systemMode={systemMode}
++          images={'images' in card ? card.images : undefined}
+         />
+       ))}
+     </div>
+diff --git a/home_energy_manager/frontend/src/lib/nibeStatusLabels.ts b/home_energy_manager/frontend/src/lib/nibeStatusLabels.ts
+index d6b1d55..39b3a98 100644
+--- a/home_energy_manager/frontend/src/lib/nibeStatusLabels.ts
++++ b/home_energy_manager/frontend/src/lib/nibeStatusLabels.ts
+@@ -99,3 +99,44 @@ export function dhwStatusColor(status: string | null): StatusColor {
+   if (status === null) return 'blue';
+   return DHW_STATUS_COLORS[status as DhwStatus] ?? 'blue';
+ }
++
++// Added 2026-10-03, Håkan's ask for the compact dashboard Nibe tile
++// ("Visa antingen Varmvatten, uppvärmning hus, avfrostning eller
++// inaktiv"): a plain-language "what's physically happening right now"
++// label, independent of the HEATING_STATUS_LABELS above (which describe
++// the DECISION ENGINE's reasoning — "extra värme, billig timme" — not
++// the pump's actual physical activity). Derived from the pump's own Prio
++// register (sensor.prio_43086 — Off/Hot Water/Heat/Pool, see
++// NibeLiveCard.tsx's docstring), with a defrost override.
++//
++// Deliberately a SEPARATE map from NibeLiveCard.tsx's own local
++// PRIO_LABELS rather than a shared refactor: that card's existing labels
++// ("Värme") are already live and unrelated to this ask, and changing them
++// to match the wording requested here ("Uppvärmning hus") would alter
++// that page's established display without being asked.
++const NIBE_ACTIVITY_LABELS: Record<string, string> = {
++  OFF: 'Inaktiv',
++  'Hot Water': 'Varmvatten',
++  Heat: 'Uppvärmning hus',
++  Pool: 'Pool',
++};
++
++// compressor_state_ep14_43427 is a free-text register whose documented
++// values include a "Defrosting" state per the community Modbus register
++// tables (anerdins/nibepi) — NOT YET CONFIRMED against Håkan's own live
++// data (his pump hadn't been observed defrosting at the time this was
++// written). Matched case-insensitively by substring so the exact wording
++// his F750 actually reports doesn't have to match precisely; if it turns
++// out to use different wording entirely, this just falls through to the
++// Prio-based label instead of breaking anything — worth revisiting once a
++// real defrost cycle has been seen live.
++function isDefrosting(compressorState: string | null): boolean {
++  if (!compressorState) return false;
++  return compressorState.toLowerCase().includes('defrost');
++}
++
++export function nibeActivityLabel(prio: string | null, compressorState: string | null): string {
++  if (isDefrosting(compressorState)) return 'Avfrostning';
++  if (prio === null) return 'Inaktiv';
++  return NIBE_ACTIVITY_LABELS[prio] ?? prio;
++}
+diff --git a/home_energy_manager/frontend/src/pages/DashboardPage.tsx b/home_energy_manager/frontend/src/pages/DashboardPage.tsx
+index 8d1cea5..2269685 100644
+--- a/home_energy_manager/frontend/src/pages/DashboardPage.tsx
++++ b/home_energy_manager/frontend/src/pages/DashboardPage.tsx
+@@ -5,7 +5,6 @@ import { BatteryModeTimeline } from '../components/BatteryModeTimeline';
+ import { BatterySettings, ElectricitySettings } from '../types';
+ import { Clock, AlertCircle } from 'lucide-react';
+ import EnergyFlowCards from '../components/EnergyFlowCards';
+-import DeviceGallery from '../components/DeviceGallery';
+ import SystemStatusCard from '../components/SystemStatusCard';
+ import CompactStatusRow from '../components/CompactStatusRow';
+ import BatterySocRangeCard from '../components/BatterySocRangeCard';
+@@ -379,18 +378,6 @@ export default function DashboardPage({
+       {/* Main Content */}
+       {hasValidData ? (
+         <>
+-          {/* Mina enheter — Håkan's own photos of his actually-installed
+-              equipment (2026-10-03, "Jag vill ha in bilderna på apparaterna
+-              i home assistant managers dashboard"). Purely visual, no live
+-              data, so it's shown even while other sections below are
+-              loading/erroring — see DeviceGallery.tsx's docstring. */}
+-          <div className="space-y-6">
+-            <div>
+-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Mina enheter</h2>
+-              <DeviceGallery />
+-            </div>
+-          </div>
+-
+           {/* System Overview Cards - New section at the top */}
+           <div className="space-y-6">
+             <div>
