@@ -677,7 +677,7 @@ const SettingsPage: React.FC = () => {
           <Settings className="h-5 w-5 text-gray-500 dark:text-gray-400" />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Settings</h1>
         </div>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Manage your BESS configuration</p>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Manage your H.E.M. configuration</p>
       </div>
 
       {/* Toast */}

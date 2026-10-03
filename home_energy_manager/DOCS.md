@@ -1,10 +1,10 @@
-# BESS Battery Manager
+# H.E.M. - Hammarberg Energy Manager
 
 Battery Energy Storage System optimization and management for Home Assistant.
 
 ## About
 
-BESS Battery Manager is a comprehensive solution for optimizing battery energy storage systems. It uses dynamic programming algorithms to minimize electricity costs by intelligently scheduling battery charge/discharge cycles based on:
+H.E.M. - Hammarberg Energy Manager is a comprehensive solution for optimizing battery energy storage systems. It uses dynamic programming algorithms to minimize electricity costs by intelligently scheduling battery charge/discharge cycles based on:
 
 - Electricity spot prices (Nordpool or Octopus Energy)
 - Solar production forecasts
@@ -32,7 +32,7 @@ For detailed installation instructions, see the [Installation Guide](https://git
    - Settings → Add-ons → Add-on Store → ⋮ → Repositories
    - Add: `https://github.com/johanzander/bess-manager`
 
-2. Install BESS Manager from the add-on store
+2. Install H.E.M. - Hammarberg Energy Manager from the add-on store
 
 3. Configure your battery settings, sensors, and pricing parameters
 
@@ -48,9 +48,9 @@ The only setting that belongs in the add-on configuration (Options tab) is `infl
 ```yaml
 influxdb:
   url: "http://homeassistant.local:8086/api/v2/query"
-  bucket: "homeassistant/autogen"
-  username: "bess"
-  password: "your_password_here"
+  bucket: "your_bucket_here"
+  org: "your_org_here"
+  token: "your_db_token_here"
 ```
 
 ### First-Time Setup
@@ -84,7 +84,7 @@ See the [Installation Guide](https://github.com/johanzander/bess-manager/blob/ma
 
 ### Web Interface
 
-Access the BESS Manager dashboard via Settings → Add-ons → BESS Manager → Open Web UI.
+Access the H.E.M. dashboard via Settings → Add-ons → H.E.M. - Hammarberg Energy Manager → Open Web UI.
 
 ### Dashboard Pages
 
@@ -114,7 +114,7 @@ working correctly.
 
 Check add-on logs for detailed information:
 
-Settings → Add-ons → BESS Manager → Log
+Settings → Add-ons → H.E.M. - Hammarberg Energy Manager → Log
 
 ## Support
 

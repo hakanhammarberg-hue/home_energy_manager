@@ -123,7 +123,7 @@ const AlertBanner: React.FC<AlertBannerProps> = ({
 
             <div className="text-sm text-red-700 dark:text-red-300 mb-3">
               <p>
-                BESS Manager cannot reliably operate or optimize your battery while this is
+                H.E.M. cannot reliably operate or optimize your battery while this is
                 unresolved. Check Home Assistant for sensor or integration errors.
                 {timestamp && <span className="italic"> As of {formatTime(timestamp)}.</span>}
               </p>
@@ -248,7 +248,7 @@ const AlertBanner: React.FC<AlertBannerProps> = ({
           </h3>
 
           <p className="text-sm text-amber-700 dark:text-amber-300 mb-2">
-            BESS Manager could not reliably operate or optimize your battery during the
+            H.E.M. could not reliably operate or optimize your battery during the
             period below — it&apos;s operating normally again now.
           </p>
 

@@ -70,7 +70,7 @@ export default function AIChatPanel() {
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/80">
         <div className="flex items-center gap-2">
           <Brain className="h-4 w-4 text-blue-500" />
-          <span className="text-sm font-semibold text-gray-900 dark:text-white">BESS Analyst</span>
+          <span className="text-sm font-semibold text-gray-900 dark:text-white">H.E.M. Analyst</span>
         </div>
         <div className="flex items-center gap-1">
           <button

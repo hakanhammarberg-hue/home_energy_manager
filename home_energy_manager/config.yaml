@@ -1,6 +1,6 @@
-name: "Home Energy Manager"
+name: "H.E.M. - Hammarberg Energy Manager"
 description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
-version: "0.1.17"
+version: "0.1.18"
 slug: "home_energy_manager"
 # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
 # there's no registry to publish this fork's image to, so the Supervisor
@@ -16,7 +16,7 @@ boot: auto
 ingress: true
 ingress_port: 8080
 panel_icon: mdi:home-lightning-bolt-outline
-panel_title: Home Energy Manager
+panel_title: H.E.M.
 panel_admin: true
 hassio_api: true
 homeassistant_api: true

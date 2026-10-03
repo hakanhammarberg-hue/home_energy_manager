@@ -15,7 +15,7 @@ describe('ReportProblemModal - File GitHub Issue', () => {
     });
     vi.spyOn(reportProblemLib, 'downloadDebugBundle').mockReturnValue(downloadPromise);
     vi.spyOn(reportProblemLib, 'buildIssueUrl').mockReturnValue(
-      'https://github.com/johanzander/bess-manager/issues/new?title=x',
+      'https://github.com/hakanhammarberg-hue/home_energy_manager/issues/new?title=x',
     );
 
     const fakeTab = { location: { href: '' }, opener: {} };
@@ -34,11 +34,11 @@ describe('ReportProblemModal - File GitHub Issue', () => {
     expect(fakeTab.opener).toBeNull();
     expect(fakeTab.location.href).toBe('');
 
-    resolveDownload('bess-debug.md');
+    resolveDownload('hem-debug.md');
 
     await waitFor(() =>
       expect(fakeTab.location.href).toBe(
-        'https://github.com/johanzander/bess-manager/issues/new?title=x',
+        'https://github.com/hakanhammarberg-hue/home_energy_manager/issues/new?title=x',
       ),
     );
   });

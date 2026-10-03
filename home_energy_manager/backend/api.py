@@ -2759,7 +2759,7 @@ async def export_debug_data(compact: bool = True):
 
         # Return minimal error report as markdown
         timestamp = datetime.now().isoformat()
-        error_report = f"""# BESS Manager Debug Export (ERROR)
+        error_report = f"""# H.E.M. Debug Export (ERROR)
 
 **Export Date**: {timestamp}
 
@@ -2771,7 +2771,7 @@ Failed to generate debug export:
 {e!s}
 ```
 
-Please check the BESS Manager logs for details.
+Please check the H.E.M. logs for details.
 """
 
         filename = f"bess-debug-error-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.md"

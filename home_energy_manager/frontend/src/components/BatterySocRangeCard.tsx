@@ -52,7 +52,7 @@ export default function BatterySocRangeCard() {
         error
           ? [`Kunde inte nå API:t: ${error}`]
           : !hasRange
-            ? ['Ingen data än — fylls på i takt med att BESS pollar SOC.']
+            ? ['Ingen data än — fylls på i takt med att H.E.M. pollar SOC.']
             : stillFilling
               ? [
                   `Fyller fortfarande på efter omstart — når ${

@@ -59,11 +59,11 @@ class DebugReportFormatter:
         Returns:
             Markdown header section
         """
-        return f"""# BESS Manager Debug Export
+        return f"""# H.E.M. Debug Export
 
 **Export Date**: {export.export_timestamp}
 
-**BESS Version**: {export.bess_version}"""
+**H.E.M. Version**: {export.bess_version}"""
 
     def format_key_findings(self, export: DebugDataExport) -> str:
         kf = export.key_findings or {}
@@ -254,7 +254,7 @@ Findings (top) and System Logs (bottom).*
 
 {chr(10).join(summary_lines)}
 
-### Resolved by BESS
+### Resolved by H.E.M.
 
 ```json
 {self._format_json(resolved)}
@@ -285,7 +285,7 @@ Findings (top) and System Logs (bottom).*
 </details>"""
 
     def _format_addon_options(self, export: DebugDataExport) -> str:
-        return f"""## BESS Configuration
+        return f"""## H.E.M. Configuration
 
 ```json
 {self._format_json(export.addon_options)}
@@ -819,11 +819,11 @@ the size; it is still a single valid JSON array.
         Returns:
             Basic markdown error report
         """
-        return f"""# BESS Manager Debug Export (ERROR)
+        return f"""# H.E.M. Debug Export (ERROR)
 
 **Export Date**: {export.export_timestamp}
 
-**BESS Version**: {export.bess_version}
+**H.E.M. Version**: {export.bess_version}
 
 ## Error During Export
 
@@ -845,5 +845,5 @@ The following data was collected before the error:
 }}
 ```
 
-Please check the BESS Manager logs for more details.
+Please check the H.E.M. logs for more details.
 """

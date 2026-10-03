@@ -15,6 +15,12 @@ import ReportProblemButton from './components/ReportProblemButton';
 import AIChatPanel from './components/AIChatPanel';
 import DemoModeBanner from './components/DemoModeBanner';
 import PreflightCheckDialog from './components/PreflightCheckDialog';
+// Håkan's own photo of his house (2026-10-03, "jag vill ha en bild på mitt
+// hus någonstans långt upp") — a personal photo of his own property, placed
+// in the sticky header so it's visible on every page. Imported (not a
+// public/ static path) so Vite fingerprints it into the build like any
+// other bundled asset.
+import houseImage from './assets/house.jpg';
 
 // An ErrorBoundary component to catch rendering errors
 class ErrorBoundary extends React.Component<
@@ -276,8 +282,26 @@ function App() {
           <header className="bg-white dark:bg-gray-800 shadow sticky top-0 z-10">
             <div className="max-w-7xl mx-auto py-2 px-4 sm:px-6 lg:px-8">
               <div className="flex justify-between items-center">
-                <div className="flex items-center space-x-4">
-                  <h1 className="text-2xl font-bold text-gray-900 dark:text-white">BESS</h1>
+                <div className="flex items-center space-x-3">
+                  {/* Håkan's own house photo (2026-10-03, "en bild på mitt hus någonstans
+                      långt upp") — a small rounded thumbnail beside the name, visible on
+                      every page since the header is sticky. */}
+                  <img
+                    src={houseImage}
+                    alt="Hammarbergs hus"
+                    className="h-9 w-9 sm:h-11 sm:w-11 rounded-lg object-cover shrink-0 ring-1 ring-black/5 dark:ring-white/10"
+                  />
+                  {/* Renamed 2026-10-03 per Håkan ("längst upp står det 'Bess'... byt till
+                      H.E.M. - Hammarberg energy manager"): "H.E.M." stays visible even on a
+                      phone-width header, the full name appends itself from the sm: breakpoint
+                      up where there's room — both are literally the same requested name, just
+                      typographically split so the header never overflows/wraps. */}
+                  <h1 className="text-lg sm:text-2xl font-bold text-gray-900 dark:text-white leading-tight whitespace-nowrap">
+                    H.E.M.
+                    <span className="ml-1.5 hidden sm:inline text-sm font-normal text-gray-500 dark:text-gray-400">
+                      – Hammarberg Energy Manager
+                    </span>
+                  </h1>
                 </div>
                 <div className="flex items-center space-x-4">
                   {/* Navigation Menu */}

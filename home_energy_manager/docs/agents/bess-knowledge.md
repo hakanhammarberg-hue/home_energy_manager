@@ -1,9 +1,9 @@
-# BESS Domain Knowledge
+# H.E.M. Domain Knowledge
 
 This document contains the domain knowledge an analyst needs to answer
-questions about the BESS Manager battery optimization system.  It is the
-single source of truth for both the in-app AI chat and the GitHub analysis
-agent.
+questions about the H.E.M. - Hammarberg Energy Manager battery optimization
+system.  It is the single source of truth for both the in-app AI chat and
+the GitHub analysis agent.
 
 For deeper investigation, use tools to read the source code directly.
 Key files: `core/bess/dp_battery_algorithm.py` (optimizer),
@@ -14,7 +14,7 @@ Key files: `core/bess/dp_battery_algorithm.py` (optimizer),
 
 ## How the System Works
 
-BESS Manager optimizes a home battery to minimize electricity costs.  Every
+H.E.M. optimizes a home battery to minimize electricity costs.  Every
 15 minutes it re-runs a dynamic programming optimizer that looks at:
 
 - **Electricity prices** (today + tomorrow when available, at 15-min resolution)
@@ -880,7 +880,7 @@ All four strategies above describe *normal* usage — they are built from
 history, or from a constant.  None of them can know that the EV is charging
 tonight, that the pool pump is being skipped, or that the house is empty for
 a week.  The **overlay** is the input channel for exactly that: the user
-declares what differs from normal, and BESS composes it onto whichever
+declares what differs from normal, and H.E.M. composes it onto whichever
 strategy is configured.
 
 It is **not a fifth strategy**.  It is a post-processing stage, so it applies
@@ -889,7 +889,7 @@ identically on top of `ha_statistics`, `influxdb_7d_avg`, `sensor` and
 forecast it would have had — "no overlay" is a supported configuration, not a
 degraded one, which is why the feature has no cold-start step.
 
-The user points BESS at a template sensor (`consumption_overlay`) whose
+The user points H.E.M. at a template sensor (`consumption_overlay`) whose
 `blocks` attribute is a sparse list of timestamped spans:
 
     {start, end, energy_kwh, mode}

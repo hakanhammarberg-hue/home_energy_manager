@@ -4,7 +4,11 @@
 
 import api from './api';
 
-const REPO_URL = 'https://github.com/johanzander/bess-manager';
+// Fixed 2026-10-03: this pointed at the upstream project's own repo
+// (johanzander/bess-manager), not Håkan's fork — "Report a Problem" was
+// filing issues nobody watching this fork would ever see. Now points at
+// the actual repo this app's code lives in.
+const REPO_URL = 'https://github.com/hakanhammarberg-hue/home_energy_manager';
 
 export interface IssueDraft {
   title?: string;
@@ -19,7 +23,7 @@ export interface IssueDraft {
 export async function downloadDebugBundle(): Promise<string> {
   const response = await api.get('/api/export-debug-data', { responseType: 'blob' });
   const contentDisposition = response.headers['content-disposition'] as string | undefined;
-  let filename = 'bess-debug.md';
+  let filename = 'hem-debug.md';
   if (contentDisposition) {
     const m = contentDisposition.match(/filename=(.+)/);
     if (m) filename = m[1].replace(/"/g, '');

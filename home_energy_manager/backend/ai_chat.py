@@ -1,4 +1,4 @@
-"""AI Analyst chat service for in-app BESS analysis.
+"""AI Analyst chat service for in-app H.E.M. analysis.
 
 Provides a streaming chat interface backed by the Claude API.  The system prompt
 combines a chat-specific preamble with shared domain knowledge from
@@ -59,7 +59,7 @@ _TOOLS = [
     {
         "name": "read_file",
         "description": (
-            "Read a source file from the BESS Manager codebase.  Returns the "
+            "Read a source file from the H.E.M. codebase.  Returns the "
             "file contents with line numbers.  For large files, use start_line "
             "and end_line to read a specific range."
         ),
@@ -88,7 +88,7 @@ _TOOLS = [
     {
         "name": "search_code",
         "description": (
-            "Search the BESS Manager codebase for a regex pattern.  Returns "
+            "Search the H.E.M. codebase for a regex pattern.  Returns "
             "matching lines with file paths and line numbers.  Use to find "
             "functions, variables, error messages, or trace code paths."
         ),
@@ -110,7 +110,7 @@ _TOOLS = [
     {
         "name": "list_files",
         "description": (
-            "List source files in a directory of the BESS Manager codebase.  "
+            "List source files in a directory of the H.E.M. codebase.  "
             "Returns file names with sizes.  Useful for understanding project "
             "structure before reading specific files."
         ),
@@ -140,7 +140,7 @@ _MAX_TOOL_RESULT_CHARS = 200_000
 
 # Preamble prepended to the agent definition to adapt it for in-app use.
 _PREAMBLE = """\
-You are an AI analyst embedded in the BESS Manager web UI.  The user is a
+You are an AI analyst embedded in the H.E.M. web UI.  The user is a
 home owner looking at their battery dashboard.  They ask you questions about
 performance, optimization decisions, savings, and configuration.
 
@@ -692,7 +692,7 @@ class AIAnalystService:
                 "bess-knowledge.md not found at %s — using minimal prompt",
                 _KNOWLEDGE_MD_PATH,
             )
-            return "You are a BESS (Battery Energy Storage System) analyst."
+            return "You are an H.E.M. (Hammarberg Energy Manager) analyst."
 
         # Strip YAML frontmatter if present (between --- markers at the start).
         stripped = re.sub(r"\A---\n.*?\n---\n*", "", raw, count=1, flags=re.DOTALL)

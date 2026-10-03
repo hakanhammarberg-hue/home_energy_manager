@@ -505,7 +505,7 @@ const SetupWizardPage: React.FC = () => {
           <div className="flex justify-center mb-3">
             <Zap className="h-10 w-10 text-blue-500" />
           </div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">BESS Auto-Configuration</h1>
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">H.E.M. Auto-Configuration</h1>
           <p className="mt-2 text-gray-600 dark:text-gray-400">
             Detecting integrations and mapping sensor entity IDs
           </p>
@@ -841,8 +841,8 @@ const SetupWizardPage: React.FC = () => {
             <h2 className="text-xl font-bold text-gray-900 dark:text-white">Setup Complete!</h2>
             <p className="text-gray-600 dark:text-gray-400 mt-2">
               {controlMode === 'demo'
-                ? 'BESS Manager is running in demo mode. You can switch to live control anytime in Settings.'
-                : 'BESS Manager is configured and ready to optimize your battery.'}
+                ? 'H.E.M. is running in demo mode. You can switch to live control anytime in Settings.'
+                : 'H.E.M. is configured and ready to optimize your battery.'}
             </p>
             <button
               onClick={() => navigate('/', { replace: true })}
