@@ -100,55 +100,67 @@ export default function CompactStatusCard({
   annotation,
   metrics,
 }: CompactStatusCardProps) {
+  // Redesigned 2026-10-04 per Håkan's direct feedback on the v0.1.20
+  // screenshot ("Ikonerna är löjligt små... bör sättas till höger om
+  // informationen och bilderna bör kunna vara nästan lika höga som
+  // rutan"): the icon/photo used to sit tiny and inline next to the
+  // title. It now lives in its own panel on the RIGHT edge of the tile,
+  // stretching the tile's full height (flex row, no fixed heights here —
+  // the panel just matches whatever height the text column ends up
+  // being). A lucide icon (e.g. Zaptec Go 2's Zap, which has no real
+  // device photo of its own — see CompactStatusRow.tsx's docstring)
+  // renders large inside the same panel instead of a tiny inline glyph,
+  // so it reads as a real icon rather than looking "missing".
   return (
-    <div className={`border rounded-lg p-2.5 flex flex-col gap-1 ${COLOR_CLASSES[color]}`}>
-      <div className="flex items-center min-w-0">
-        {image ? (
-          <img
-            src={image.src}
-            alt={image.alt}
-            className="h-5 w-5 rounded-sm object-cover mr-1.5 shrink-0 bg-white"
-          />
-        ) : Icon ? (
-          <Icon className={`h-4 w-4 ${ICON_COLOR_CLASSES[color]} mr-1.5 shrink-0`} />
-        ) : null}
+    <div className={`border rounded-lg overflow-hidden flex items-stretch ${COLOR_CLASSES[color]}`}>
+      <div className="flex-1 min-w-0 p-2.5 flex flex-col justify-center gap-1">
         <h3 className="text-xs font-medium text-gray-600 dark:text-gray-400 truncate">
           {title}
         </h3>
+
+        <div>
+          <p className="text-xl font-bold text-gray-900 dark:text-gray-100 leading-tight truncate">
+            {keyValue}
+            {keyUnit && (
+              <span className="text-xs font-normal text-gray-600 dark:text-gray-400 ml-1">
+                {keyUnit}
+              </span>
+            )}
+          </p>
+          {annotation ? (
+            <p className="text-xs text-red-500 dark:text-red-400 truncate mt-0.5">{annotation}</p>
+          ) : (
+            <>
+              {statusLine && (
+                <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
+                  {statusLine}
+                </p>
+              )}
+              {metrics?.map(m => (
+                <p
+                  key={m.label}
+                  className="flex justify-between gap-2 text-[11px] text-gray-500 dark:text-gray-400 truncate"
+                >
+                  <span className="truncate">{m.label}</span>
+                  <span className="shrink-0 font-medium text-gray-600 dark:text-gray-300">
+                    {m.value}
+                  </span>
+                </p>
+              ))}
+            </>
+          )}
+        </div>
       </div>
 
-      <div>
-        <p className="text-xl font-bold text-gray-900 dark:text-gray-100 leading-tight truncate">
-          {keyValue}
-          {keyUnit && (
-            <span className="text-xs font-normal text-gray-600 dark:text-gray-400 ml-1">
-              {keyUnit}
-            </span>
-          )}
-        </p>
-        {annotation ? (
-          <p className="text-xs text-red-500 dark:text-red-400 truncate mt-0.5">{annotation}</p>
-        ) : (
-          <>
-            {statusLine && (
-              <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
-                {statusLine}
-              </p>
-            )}
-            {metrics?.map(m => (
-              <p
-                key={m.label}
-                className="flex justify-between gap-2 text-[11px] text-gray-500 dark:text-gray-400 truncate"
-              >
-                <span className="truncate">{m.label}</span>
-                <span className="shrink-0 font-medium text-gray-600 dark:text-gray-300">
-                  {m.value}
-                </span>
-              </p>
-            ))}
-          </>
-        )}
-      </div>
+      {(image || Icon) && (
+        <div className="w-16 sm:w-20 shrink-0 flex items-center justify-center bg-white/50 dark:bg-black/20">
+          {image ? (
+            <img src={image.src} alt={image.alt} className="h-full w-full object-cover" />
+          ) : Icon ? (
+            <Icon className={`h-8 w-8 ${ICON_COLOR_CLASSES[color]}`} />
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

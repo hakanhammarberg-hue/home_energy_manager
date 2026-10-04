@@ -46,8 +46,15 @@ export interface StatusCardProps {
    * panels, battery, Growatt inverter — see frontend/src/assets/devices/'s
    * own provenance notes) directly inside the "Home Power" card rather
    * than in a separate gallery row ("Lägg dem istället här: ... inuti
-   * rutan för home power"). A small overlapping thumbnail stack next to
-   * the title, purely decorative — no live data attached.
+   * rutan för home power"). Purely decorative — no live data attached.
+   *
+   * Redesigned 2026-10-04 per Håkan's direct feedback on the v0.1.20
+   * screenshot ("bilderna bör kunna vara nästan lika höga som rutan.
+   * Samma storlek i home power" — same large-image-on-the-right treatment
+   * as CompactStatusCard got that day): no longer a row of tiny
+   * overlapping circles in the header. Now a dedicated column on the
+   * card's right edge, stretching the card's full height, with each
+   * photo sharing an equal vertical slice of it — see the render below.
    */
   images?: { src: string; alt: string }[];
 }
@@ -97,28 +104,15 @@ export const StatusCard: React.FC<StatusCardProps> = ({
   };
 
   return (
-    <div className={`border rounded-lg p-6 ${colorClasses[color]} ${className}`}>
+    <div className={`border rounded-lg overflow-hidden flex items-stretch ${colorClasses[color]} ${className}`}>
+    <div className="flex-1 min-w-0 p-6">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center">
           <Icon className={`h-6 w-6 ${iconColorClasses[color]} mr-3`} />
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h3>
         </div>
-        <div className="flex items-center gap-3">
-          {images && images.length > 0 && (
-            <div className="flex items-center -space-x-2">
-              {images.map((img) => (
-                <img
-                  key={img.src}
-                  src={img.src}
-                  alt={img.alt}
-                  className="h-8 w-8 rounded-full object-cover border-2 border-white dark:border-gray-800 shrink-0 bg-white"
-                />
-              ))}
-            </div>
-          )}
-          {headerRight}
-        </div>
+        {headerRight && <div className="flex items-center gap-3">{headerRight}</div>}
       </div>
 
       {/*
@@ -184,6 +178,20 @@ export const StatusCard: React.FC<StatusCardProps> = ({
           </React.Fragment>
         ))}
       </div>
+    </div>
+
+      {images && images.length > 0 && (
+        <div className="w-20 sm:w-28 shrink-0 flex flex-col">
+          {images.map((img) => (
+            <img
+              key={img.src}
+              src={img.src}
+              alt={img.alt}
+              className="w-full flex-1 min-h-0 object-cover"
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 };
