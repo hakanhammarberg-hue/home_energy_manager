@@ -1,0 +1,221 @@
+From 7691a885fa11201c36e02e669fb2dc848f73394c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 06:26:28 +0000
+Subject: [PATCH] Enlarge compact-tile and Home Power device images into a
+ full-height right-side panel
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Håkan's feedback on the v0.1.20 screenshot: icons/photos were tiny and
+easy to miss (reported as the Zaptec Go 2 icon being outright 'missing').
+Both CompactStatusCard and the Home Power StatusCard now put the
+image/icon in its own panel on the tile/card's right edge, stretching
+the full height instead of a small inline glyph next to the title.
+---
+ home_energy_manager/config.yaml               |  2 +-
+ .../src/components/CompactStatusCard.tsx      | 96 +++++++++++--------
+ .../src/components/SystemStatusCard.tsx       | 44 +++++----
+ 3 files changed, 81 insertions(+), 61 deletions(-)
+
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 72cadae..88830cb 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "H.E.M. - Hammarberg Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.20"
++version: "0.1.21"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/frontend/src/components/CompactStatusCard.tsx b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+index ad8e864..d5bfe6e 100644
+--- a/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
++++ b/home_energy_manager/frontend/src/components/CompactStatusCard.tsx
+@@ -100,55 +100,67 @@ export default function CompactStatusCard({
+   annotation,
+   metrics,
+ }: CompactStatusCardProps) {
++  // Redesigned 2026-10-04 per Håkan's direct feedback on the v0.1.20
++  // screenshot ("Ikonerna är löjligt små... bör sättas till höger om
++  // informationen och bilderna bör kunna vara nästan lika höga som
++  // rutan"): the icon/photo used to sit tiny and inline next to the
++  // title. It now lives in its own panel on the RIGHT edge of the tile,
++  // stretching the tile's full height (flex row, no fixed heights here —
++  // the panel just matches whatever height the text column ends up
++  // being). A lucide icon (e.g. Zaptec Go 2's Zap, which has no real
++  // device photo of its own — see CompactStatusRow.tsx's docstring)
++  // renders large inside the same panel instead of a tiny inline glyph,
++  // so it reads as a real icon rather than looking "missing".
+   return (
+-    <div className={`border rounded-lg p-2.5 flex flex-col gap-1 ${COLOR_CLASSES[color]}`}>
+-      <div className="flex items-center min-w-0">
+-        {image ? (
+-          <img
+-            src={image.src}
+-            alt={image.alt}
+-            className="h-5 w-5 rounded-sm object-cover mr-1.5 shrink-0 bg-white"
+-          />
+-        ) : Icon ? (
+-          <Icon className={`h-4 w-4 ${ICON_COLOR_CLASSES[color]} mr-1.5 shrink-0`} />
+-        ) : null}
++    <div className={`border rounded-lg overflow-hidden flex items-stretch ${COLOR_CLASSES[color]}`}>
++      <div className="flex-1 min-w-0 p-2.5 flex flex-col justify-center gap-1">
+         <h3 className="text-xs font-medium text-gray-600 dark:text-gray-400 truncate">
+           {title}
+         </h3>
+-      </div>
+ 
+-      <div>
+-        <p className="text-xl font-bold text-gray-900 dark:text-gray-100 leading-tight truncate">
+-          {keyValue}
+-          {keyUnit && (
+-            <span className="text-xs font-normal text-gray-600 dark:text-gray-400 ml-1">
+-              {keyUnit}
+-            </span>
+-          )}
+-        </p>
+-        {annotation ? (
+-          <p className="text-xs text-red-500 dark:text-red-400 truncate mt-0.5">{annotation}</p>
+-        ) : (
+-          <>
+-            {statusLine && (
+-              <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
+-                {statusLine}
+-              </p>
++        <div>
++          <p className="text-xl font-bold text-gray-900 dark:text-gray-100 leading-tight truncate">
++            {keyValue}
++            {keyUnit && (
++              <span className="text-xs font-normal text-gray-600 dark:text-gray-400 ml-1">
++                {keyUnit}
++              </span>
+             )}
+-            {metrics?.map(m => (
+-              <p
+-                key={m.label}
+-                className="flex justify-between gap-2 text-[11px] text-gray-500 dark:text-gray-400 truncate"
+-              >
+-                <span className="truncate">{m.label}</span>
+-                <span className="shrink-0 font-medium text-gray-600 dark:text-gray-300">
+-                  {m.value}
+-                </span>
+-              </p>
+-            ))}
+-          </>
+-        )}
++          </p>
++          {annotation ? (
++            <p className="text-xs text-red-500 dark:text-red-400 truncate mt-0.5">{annotation}</p>
++          ) : (
++            <>
++              {statusLine && (
++                <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
++                  {statusLine}
++                </p>
++              )}
++              {metrics?.map(m => (
++                <p
++                  key={m.label}
++                  className="flex justify-between gap-2 text-[11px] text-gray-500 dark:text-gray-400 truncate"
++                >
++                  <span className="truncate">{m.label}</span>
++                  <span className="shrink-0 font-medium text-gray-600 dark:text-gray-300">
++                    {m.value}
++                  </span>
++                </p>
++              ))}
++            </>
++          )}
++        </div>
+       </div>
++
++      {(image || Icon) && (
++        <div className="w-16 sm:w-20 shrink-0 flex items-center justify-center bg-white/50 dark:bg-black/20">
++          {image ? (
++            <img src={image.src} alt={image.alt} className="h-full w-full object-cover" />
++          ) : Icon ? (
++            <Icon className={`h-8 w-8 ${ICON_COLOR_CLASSES[color]}`} />
++          ) : null}
++        </div>
++      )}
+     </div>
+   );
+ }
+diff --git a/home_energy_manager/frontend/src/components/SystemStatusCard.tsx b/home_energy_manager/frontend/src/components/SystemStatusCard.tsx
+index 1b63c9f..4217d2d 100644
+--- a/home_energy_manager/frontend/src/components/SystemStatusCard.tsx
++++ b/home_energy_manager/frontend/src/components/SystemStatusCard.tsx
+@@ -46,8 +46,15 @@ export interface StatusCardProps {
+    * panels, battery, Growatt inverter — see frontend/src/assets/devices/'s
+    * own provenance notes) directly inside the "Home Power" card rather
+    * than in a separate gallery row ("Lägg dem istället här: ... inuti
+-   * rutan för home power"). A small overlapping thumbnail stack next to
+-   * the title, purely decorative — no live data attached.
++   * rutan för home power"). Purely decorative — no live data attached.
++   *
++   * Redesigned 2026-10-04 per Håkan's direct feedback on the v0.1.20
++   * screenshot ("bilderna bör kunna vara nästan lika höga som rutan.
++   * Samma storlek i home power" — same large-image-on-the-right treatment
++   * as CompactStatusCard got that day): no longer a row of tiny
++   * overlapping circles in the header. Now a dedicated column on the
++   * card's right edge, stretching the card's full height, with each
++   * photo sharing an equal vertical slice of it — see the render below.
+    */
+   images?: { src: string; alt: string }[];
+ }
+@@ -97,28 +104,15 @@ export const StatusCard: React.FC<StatusCardProps> = ({
+   };
+ 
+   return (
+-    <div className={`border rounded-lg p-6 ${colorClasses[color]} ${className}`}>
++    <div className={`border rounded-lg overflow-hidden flex items-stretch ${colorClasses[color]} ${className}`}>
++    <div className="flex-1 min-w-0 p-6">
+       {/* Header */}
+       <div className="flex items-center justify-between mb-4">
+         <div className="flex items-center">
+           <Icon className={`h-6 w-6 ${iconColorClasses[color]} mr-3`} />
+           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h3>
+         </div>
+-        <div className="flex items-center gap-3">
+-          {images && images.length > 0 && (
+-            <div className="flex items-center -space-x-2">
+-              {images.map((img) => (
+-                <img
+-                  key={img.src}
+-                  src={img.src}
+-                  alt={img.alt}
+-                  className="h-8 w-8 rounded-full object-cover border-2 border-white dark:border-gray-800 shrink-0 bg-white"
+-                />
+-              ))}
+-            </div>
+-          )}
+-          {headerRight}
+-        </div>
++        {headerRight && <div className="flex items-center gap-3">{headerRight}</div>}
+       </div>
+ 
+       {/*
+@@ -185,6 +179,20 @@ export const StatusCard: React.FC<StatusCardProps> = ({
+         ))}
+       </div>
+     </div>
++
++      {images && images.length > 0 && (
++        <div className="w-20 sm:w-28 shrink-0 flex flex-col">
++          {images.map((img) => (
++            <img
++              key={img.src}
++              src={img.src}
++              alt={img.alt}
++              className="w-full flex-1 min-h-0 object-cover"
++            />
++          ))}
++        </div>
++      )}
++    </div>
+   );
+ };
+ 
