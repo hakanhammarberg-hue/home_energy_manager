@@ -1,4 +1,3 @@
-import { Zap } from 'lucide-react';
 import CompactStatusCard from './CompactStatusCard';
 import { usePerificPower } from '../hooks/usePerificPower';
 import { useGovernorStatus } from '../hooks/useGovernorStatus';
@@ -10,6 +9,7 @@ import { heatingStatusColor, nibeActivityLabel } from '../lib/nibeStatusLabels';
 import perificOneImage from '../assets/devices/perific-one.jpg';
 import ev3Image from '../assets/devices/ev3.jpg';
 import heatPumpImage from '../assets/devices/heat-pump.jpg';
+import zaptecImage from '../assets/devices/zaptec.jpg';
 
 // Dashboard-compaction phase (2026-09-28): four small square tiles in a
 // row — see CompactStatusCard.tsx's own docstring for the layout history
@@ -28,9 +28,11 @@ import heatPumpImage from '../assets/devices/heat-pump.jpg';
 //     own tile — "Lägg status för effektvakt i perific rutan."
 //   - "Zaptec Go 2" (replaces the old "Effektvakt" tile slot): the actual
 //     EV charger's on/off + current charging power, moved here from the
-//     old "EV-laddning" tile. No device-specific photo exists for this
-//     charger (its photo turned out to be Perific One's), so it keeps a
-//     generic icon.
+//     old "EV-laddning" tile. Initially shown with a generic Zap icon
+//     (its own photo had turned out to be Perific One's) — Håkan sent a
+//     real photo of his own Zaptec Go 2 unit on 2026-10-04 (confirmed his
+//     own, same provenance check as the original six device photos), so
+//     it now has a proper device photo like every other tile.
 //   - "Elfordon" (renamed from "EV-laddning"): the EV3's own photo, and
 //     ONLY the state of charge — "Sätt bara state of charge där."
 //   - "Nibe": the F750's own photo, keeping its kr-idag savings headline,
@@ -124,7 +126,7 @@ export default function CompactStatusRow() {
       />
       <CompactStatusCard
         title="Zaptec Go 2"
-        icon={Zap}
+        image={{ src: zaptecImage, alt: 'Zaptec Go 2' }}
         color={zaptecColor}
         keyValue={zaptecValue}
         metrics={zaptecMetrics}
