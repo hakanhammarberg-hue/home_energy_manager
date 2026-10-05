@@ -1,0 +1,763 @@
+From 34f604a52accba8eb7bf7c56c2a2417735f6a6f6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 5 Oct 2026 19:57:16 +0000
+Subject: [PATCH] Fix Zaptec Go 2 tile charging-active source; add EV
+ max-current and Nibe effektvakt settings scaffolding
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- backend/app.py: the 'Zaptec Go 2' dashboard tile's on/off state was
+  sourced from binary_sensor.ev3_ev_battery_charge (the EV3's own kia_uvo
+  charging flag), not the charger. Repointed to
+  binary_sensor.ev_laddar_zaptec (the existing HA template helper already
+  built on sensor.gpn049831_laddstatus == 'connected_charging') — same bug
+  class as the discharge_inhibit fix from 2026-09-27.
+- governor.ev_max_current_a (6-20A, settings_store/api.py/app.py): the
+  ceiling peak_governor restores Zaptec's current toward was hard-coded;
+  now configurable within the charger's own floor (6A) and Hakan's
+  requested ceiling (20A).
+- nibe.effektvakt_max_power_kw / effektvakt_governor_enabled + a new
+  EFFEKTVAKT write-safety tier on NibeController (number.max_int_add_power_47212,
+  number.fuse_47214): scaffolding for capping the F750's internal electric
+  backup heater via its own 'effektvakt' power-guard function. Both
+  registers confirmed live but 'unavailable' on Hakan's pump (effektvakt
+  never turned on at its own panel) — read-only exposure added to
+  core/nibe/live.py and NibeLiveCard.tsx for 'what is it set to now'.
+  No automatic write path wired into the polling loop yet; that is a
+  deliberate next step, not built in this pass.
+
+Verified: pytest 71/71, tsc --noEmit clean, npm run build clean (2764
+modules, unchanged), vitest 130/130.
+---
+ home_energy_manager/backend/api.py            |  30 +++++
+ home_energy_manager/backend/app.py            |  46 ++++++-
+ .../backend/ev_scheduler_api.py               |  16 ++-
+ home_energy_manager/config.yaml               |   2 +-
+ .../core/bess/settings_store.py               |  67 +++++++++-
+ home_energy_manager/core/nibe/controller.py   | 120 ++++++++++++++++++
+ home_energy_manager/core/nibe/live.py         |  16 +++
+ .../frontend/src/components/NibeLiveCard.tsx  |  16 +++
+ .../frontend/src/hooks/useNibeLive.ts         |   8 ++
+ .../frontend/src/pages/SettingsPage.tsx       |  66 +++++++++-
+ 10 files changed, 370 insertions(+), 17 deletions(-)
+
+diff --git a/home_energy_manager/backend/api.py b/home_energy_manager/backend/api.py
+index d2a5783..d552a9e 100644
+--- a/home_energy_manager/backend/api.py
++++ b/home_energy_manager/backend/api.py
+@@ -420,6 +420,22 @@ async def patch_settings(updates: dict):
+                         status_code=422,
+                         detail="governor.target_kw must be a positive number",
+                     )
++                # Added 2026-10-05 — bounds match the charger hardware:
++                # 6A is number.gpn049831_min_laddstrom (and
++                # core.zaptec.controller.ZAPTEC_FLOOR_CURRENT), 20A is the
++                # ceiling Håkan asked for. Note this does NOT by itself
++                # confirm his circuit/breaker supports 20A/3-phase — his
++                # previously-confirmed real installation limit was 16A.
++                ev_max_current_a = snake_data.get("ev_max_current_a")
++                if ev_max_current_a is not None and (
++                    not isinstance(ev_max_current_a, (int, float))
++                    or isinstance(ev_max_current_a, bool)
++                    or not (6 <= ev_max_current_a <= 20)
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="governor.ev_max_current_a must be between 6 and 20",
++                    )
+ 
+             if store_key == "nibe":
+                 percentile = snake_data.get("cheap_price_percentile")
+@@ -523,6 +539,20 @@ async def patch_settings(updates: dict):
+                         status_code=422,
+                         detail="nibe.max_continuous_economy_s must be greater than zero",
+                     )
++                # Added 2026-10-05 — bounds match number.max_int_add_power_47212's
++                # own HA-reported range (0-45kW) on Håkan's F750. See
++                # core/bess/settings_store.py's nibe.effektvakt_max_power_kw
++                # comment for why this setting doesn't do anything live yet.
++                effektvakt_max_power = snake_data.get("effektvakt_max_power_kw")
++                if effektvakt_max_power is not None and (
++                    not isinstance(effektvakt_max_power, (int, float))
++                    or isinstance(effektvakt_max_power, bool)
++                    or not (0 <= effektvakt_max_power <= 45)
++                ):
++                    raise HTTPException(
++                        status_code=422,
++                        detail="nibe.effektvakt_max_power_kw must be between 0 and 45",
++                    )
+ 
+             if store_key == "ev_scheduler":
+                 soc_cap = snake_data.get("soc_cap_percent")
+diff --git a/home_energy_manager/backend/app.py b/home_energy_manager/backend/app.py
+index 85c1beb..a0a6e45 100644
+--- a/home_energy_manager/backend/app.py
++++ b/home_energy_manager/backend/app.py
+@@ -70,18 +70,32 @@ EV_SOC_ENTITY = "sensor.ev3_ev_battery_level"
+ EV_PLUG_ENTITY = "binary_sensor.ev3_ev_battery_plug"
+ 
+ # Added 2026-09-29 for the dashboard's "when will Kian be full" ask.
+-# EV_CHARGING_ENTITY is the car's own is-actually-charging flag — distinct
+-# from EV_PLUG_ENTITY (plugged in, which can be true while paused/full) and
+-# from the ev_scheduler's own chargingAllowed (the app's decision, which can
+-# be true while the car itself isn't drawing power, e.g. not plugged in).
+ # EV_CHARGE_DURATION_ENTITY is kia_uvo's own "Estimated Charge Duration"
+ # (minutes, via the currently connected charger) — the car's own BMS
+ # estimate of time-to-target, which already accounts for charge-curve
+ # tapering near full and isn't something worth re-deriving from
+ # power/capacity here.
+-EV_CHARGING_ENTITY = "binary_sensor.ev3_ev_battery_charge"
+ EV_CHARGE_DURATION_ENTITY = "sensor.ev3_estimated_charge_duration"
+ 
++# FIXED 2026-10-05 — was binary_sensor.ev3_ev_battery_charge (the car's own
++# kia_uvo is-actually-charging flag). That's wrong for this field's actual
++# consumer: the dashboard's "Zaptec Go 2" tile (CompactStatusRow.tsx),
++# which is titled and imaged as the CHARGER, not the car. The car's own
++# flag and the charger's own session state are independent (different
++# vendors/integrations, different poll cadence) and can briefly disagree —
++# exactly the same class of bug already found and fixed once in this
++# project for discharge_inhibit (see git history, 2026-09-27): a raw
++# enum-valued sensor (sensor.gpn049831_laddstatus, values like
++# "connected_charging"/"disconnected") compared against the literal string
++# "on" never actually matches. binary_sensor.ev_laddar_zaptec is the
++# existing HA template helper that already does that comparison correctly
++# ({{ states('sensor.gpn049831_laddstatus') == 'connected_charging' }},
++# device_class battery_charging) — confirmed live 2026-10-05, state "on"
++# while a charging session is active. Using it here instead of either the
++# car's flag or a second ad-hoc comparison keeps exactly one place in HA
++# that encodes "is the Zaptec actually charging".
++ZAPTEC_CHARGING_ACTIVE_ENTITY = "binary_sensor.ev_laddar_zaptec"
++
+ # Added 2026-09-30 for the compact dashboard row's "is it actually charging,
+ # and at what power" ask (Håkan: "Laddningsrutan för elbil kan berätta om
+ # laddning pågår eller ej och med vilken effekt"). This is the Zaptec
+@@ -108,6 +122,17 @@ EV_CHARGING_POWER_ENTITY = "sensor.gpn049831_laddeffekt"
+ NIBE_HEAT_OFFSET_ENTITY = "number.heat_offset_s1_47011"
+ NIBE_DHW_COMFORT_MODE_ENTITY = "select.hot_water_comfort_mode_47041"
+ 
++# Added 2026-10-05 — the pump's own "effektvakt" (power-guard) registers.
++# Both were disabled_by="integration" (never enabled before); enabled + the
++# nibe_heatpump config entry reloaded 2026-10-05, same pattern as every
++# other register above. Both confirmed "unavailable" after that —
++# effektvakt has never been turned on at the pump's own panel (no fuse
++# size entered there). See core/nibe/controller.py's EFFEKTVAKT tier and
++# core/bess/settings_store.py's nibe.effektvakt_max_power_kw comment for
++# the full story and current status.
++NIBE_EFFEKTVAKT_MAX_POWER_ENTITY = "number.max_int_add_power_47212"
++NIBE_EFFEKTVAKT_FUSE_ENTITY = "number.fuse_47214"
++
+ # Fas 4d (2026-09-26): degree-minutes floor input — see
+ # core/nibe/decision.py's FOURTH LEVER section. Read-only, a raw
+ # _read_raw_entity_state() poll like INVERTER_VPP_REMOTE_CONTROL_ENTITY
+@@ -544,6 +569,8 @@ class BESSController:
+             token=ha_token,
+             heat_offset_entity=NIBE_HEAT_OFFSET_ENTITY,
+             dhw_comfort_mode_entity=NIBE_DHW_COMFORT_MODE_ENTITY,
++            effektvakt_max_power_entity=NIBE_EFFEKTVAKT_MAX_POWER_ENTITY,
++            effektvakt_fuse_entity=NIBE_EFFEKTVAKT_FUSE_ENTITY,
+         )
+ 
+     def set_demo_mode(self, enabled: bool) -> None:
+@@ -650,7 +677,7 @@ class BESSController:
+         plug_raw = self._read_raw_entity_state(EV_PLUG_ENTITY)
+         plug_connected = None if plug_raw is None else plug_raw == "on"
+ 
+-        charging_raw = self._read_raw_entity_state(EV_CHARGING_ENTITY)
++        charging_raw = self._read_raw_entity_state(ZAPTEC_CHARGING_ACTIVE_ENTITY)
+         self.ev_last_charging_active = None if charging_raw is None else charging_raw == "on"
+ 
+         duration_raw = self._read_raw_entity_state(EV_CHARGE_DURATION_ENTITY)
+@@ -891,6 +918,12 @@ class BESSController:
+             return
+ 
+         target_kw = governor_settings.get("target_kw", peak_governor.DEFAULT_TARGET_KW)
++        # Added 2026-10-05 — was hard-coded to peak_governor's own
++        # ZAPTEC_NORMAL_MAX_CURRENT module constant (16A) before this;
++        # see settings_store.py's governor.ev_max_current_a comment.
++        ev_max_current_a = governor_settings.get(
++            "ev_max_current_a", peak_governor.ZAPTEC_NORMAL_MAX_CURRENT
++        )
+         current_kw = self.perific_reader.get_power_total_kw()
+         ev_current_a = self.zaptec_controller.get_available_current_a()
+         charging_switch_on = self.zaptec_controller.get_charging_switch_on()
+@@ -910,6 +943,7 @@ class BESSController:
+             target_kw=target_kw,
+             ev_current_a=ev_current_a,
+             charging_switch_on=charging_switch_on,
++            normal_max_current=ev_max_current_a,
+         )
+ 
+         if decision.ev_current_target_a is not None:
+diff --git a/home_energy_manager/backend/ev_scheduler_api.py b/home_energy_manager/backend/ev_scheduler_api.py
+index 43defc2..e48ecda 100644
+--- a/home_energy_manager/backend/ev_scheduler_api.py
++++ b/home_energy_manager/backend/ev_scheduler_api.py
+@@ -45,11 +45,17 @@ def _status_payload(bess_controller: Any) -> dict:
+         "status": decision.status if decision is not None else None,
+         "chargingAllowed": decision.charging_allowed if decision is not None else None,
+         "reason": decision.reason if decision is not None else None,
+-        # Added 2026-09-29: the car's own ground truth, independent of
+-        # `enabled`/`status`/`chargingAllowed` above (which are all about
+-        # whether THIS APP is gating charging) — see app.py's
+-        # _poll_ev_charging for why these three are read every tick
+-        # regardless of the ev_scheduler feature toggle.
++        # Added 2026-09-29: ground truth independent of `enabled`/`status`/
++        # `chargingAllowed` above (which are all about whether THIS APP is
++        # gating charging) — see app.py's _poll_ev_charging for why these
++        # three are read every tick regardless of the ev_scheduler feature
++        # toggle. FIXED 2026-10-05: this was the car's own kia_uvo flag
++        # (binary_sensor.ev3_ev_battery_charge), which fed the dashboard's
++        # "Zaptec Go 2" tile despite being a different vendor/device than
++        # the charger that tile is named and pictured after. Now sourced
++        # from binary_sensor.ev_laddar_zaptec — the charger's own session
++        # state — so this field means what the tile says it means. See
++        # app.py's ZAPTEC_CHARGING_ACTIVE_ENTITY comment for the full story.
+         "chargingActive": getattr(bess_controller, "ev_last_charging_active", None),
+         "estimatedChargeDurationMin": getattr(
+             bess_controller, "ev_last_charge_duration_min", None
+diff --git a/home_energy_manager/config.yaml b/home_energy_manager/config.yaml
+index 6c975d9..1e63fb8 100644
+--- a/home_energy_manager/config.yaml
++++ b/home_energy_manager/config.yaml
+@@ -1,6 +1,6 @@
+ name: "H.E.M. - Hammarberg Energy Manager"
+ description: "Battery, EV charging, heat pump and peak-power management (fork of BESS Manager)"
+-version: "0.1.22"
++version: "0.1.23"
+ slug: "home_energy_manager"
+ # No 'image' key, unlike upstream's ghcr.io/johanzander/bess-manager-{arch} —
+ # there's no registry to publish this fork's image to, so the Supervisor
+diff --git a/home_energy_manager/core/bess/settings_store.py b/home_energy_manager/core/bess/settings_store.py
+index f69f378..19b4096 100644
+--- a/home_energy_manager/core/bess/settings_store.py
++++ b/home_energy_manager/core/bess/settings_store.py
+@@ -588,7 +588,20 @@ class SettingsStore:
+             # max, 12kW leaves margin). Not imported from there to avoid a
+             # backend/core.bess → core.governor dependency for one constant;
+             # if the two ever need to drift apart, that's worth noticing.
+-            "governor": {"enabled": False, "target_kw": 12.0},
++            #
++            # ev_max_current_a added 2026-10-05 — the ceiling peak_governor
++            # restores Zaptec's charging current toward when household load
++            # is back under budget (previously hard-coded to
++            # core.governor.peak_governor.ZAPTEC_NORMAL_MAX_CURRENT = 16,
++            # Håkan's own confirmed 16A/3-phase wiring limit). Now
++            # settings-driven so he can raise it without a code change;
++            # bounded 6-20A in backend/api.py (6 matches
++            # number.gpn049831_min_laddstrom, the charger's own floor — see
++            # core.zaptec.controller.ZAPTEC_FLOOR_CURRENT). Default kept at
++            # 16, his previously-confirmed real installation limit — going
++            # above it is only safe if his circuit/breaker is actually
++            # rated for it; this setting doesn't know that and won't warn.
++            "governor": {"enabled": False, "target_kw": 12.0, "ev_max_current_a": 16.0},
+             # Fas 5b (2026-08-31) — off by default, same as governor. Values
+             # match core.zaptec.scheduler's DEFAULT_* constants (not imported,
+             # same reasoning as governor's target_kw comment above: avoid a
+@@ -654,6 +667,37 @@ class SettingsStore:
+                 "heat_offset_reduction_c": -2,
+                 "upgrade_cooldown_s": 1200.0,
+                 "max_continuous_economy_s": 259200.0,
++                # Added 2026-10-05 — Håkan asked for a Nibe "max allowed
++                # power" setting, modelled on the pump's own "effektvakt"
++                # (power-guard) function. Investigated live against his
++                # F750: effektvakt is driven by two Modbus registers,
++                # number.fuse_47214 (main fuse rating, 1-400A) and
++                # number.max_int_add_power_47212 (cap on the internal
++                # electric backup heater, 0-45kW, continuous — NOT a fixed
++                # 2-3-step selector, despite that being a common F-series
++                # wiring pattern). Both were disabled_by="integration" in
++                # HA's registry (never enabled before); enabled + the
++                # nibe_heatpump config entry reloaded 2026-10-05, same
++                # pattern as every other register in this file's history.
++                # Confirmed CURRENT STATE: both still read "unavailable"
++                # after that — effektvakt itself has never been turned on
++                # at the pump's own control panel (no fuse size entered),
++                # so there is nothing running to cap yet. This setting and
++                # effektvakt_governor_enabled below are the scaffolding
++                # (validated, ready to use) for the day it is turned on;
++                # see core/nibe/controller.py's EFFEKTVAKT tier and
++                # core/nibe/live.py's fuseRatingA/effektvaktMaxPowerKw for
++                # the read side. No automatic write path is wired into the
++                # governor polling loop yet — that is a deliberate,
++                # separate next step (same "capability now, decision logic
++                # later" split as every other lever in this file), not
++                # built in this pass. 6.0 is an explicitly unconfirmed
++                # guess (same honest flagging as degree_minutes_floor
++                # above) — a typical single-step size for an F-series
++                # internal electric addition, not a measured value for
++                # Håkan's own installation.
++                "effektvakt_governor_enabled": False,
++                "effektvakt_max_power_kw": 6.0,
+             },
+         }
+ 
+@@ -904,8 +948,22 @@ class SettingsStore:
+ 
+         # --- governor section (added Fas 3b, 2026-08-30) ---
+         if "governor" not in self.data:
+-            self.data["governor"] = {"enabled": False, "target_kw": 12.0}
++            self.data["governor"] = {
++                "enabled": False,
++                "target_kw": 12.0,
++                "ev_max_current_a": 16.0,
++            }
+             changed = True
++        elif isinstance(self.data.get("governor"), dict):
++            # ev_max_current_a added 2026-10-05 — backfill for existing
++            # installs so peak_governor's restore-ceiling reads a real
++            # number instead of falling back to the hard-coded constant at
++            # every call site. 16.0 matches that previous hard-coded
++            # constant exactly, so this is a no-behavior-change-on-upgrade
++            # default, same convention as the nibe backfill below.
++            if "ev_max_current_a" not in self.data["governor"]:
++                self.data["governor"]["ev_max_current_a"] = 16.0
++                changed = True
+ 
+         # --- ev_scheduler section (added Fas 5b, 2026-08-31) ---
+         if "ev_scheduler" not in self.data:
+@@ -960,6 +1018,11 @@ class SettingsStore:
+                 "heat_offset_reduction_c": -2,
+                 "upgrade_cooldown_s": 1200.0,
+                 "max_continuous_economy_s": 259200.0,
++                # effektvakt_* added 2026-10-05 — see this section's
++                # top-level default dict above for the full story. Off/
++                # inert on backfill, same no-behavior-change convention.
++                "effektvakt_governor_enabled": False,
++                "effektvakt_max_power_kw": 6.0,
+             }
+             for key, default_value in nibe_defaults.items():
+                 if key not in nibe_section:
+diff --git a/home_energy_manager/core/nibe/controller.py b/home_energy_manager/core/nibe/controller.py
+index d91e9a6..4d7a543 100644
+--- a/home_energy_manager/core/nibe/controller.py
++++ b/home_energy_manager/core/nibe/controller.py
+@@ -37,6 +37,15 @@ THE WRITE-SAFETY CLASSIFICATION (design decision, 2026-09, revised 2026-09-22)
+         human might also be changing by hand in the pump's own menu at the
+         same time — worth distinguishing in logs/diagnostics from the
+         curve-offset lever above. Implemented below.
++    - EFFEKTVAKT — number.max_int_add_power_47212 (cap on the internal
++        electric backup heater, part of the pump's own "effektvakt"
++        power-guard function). Added 2026-10-05 as its own tier, same
++        reasoning as GUARDED: it's a real safety-relevant power limit a
++        human might also be adjusting via the pump's own panel, distinct
++        enough from the curve-offset comfort lever to want separate
++        logging/diagnostics. Implemented below (set_effektvakt_max_power_kw),
++        but — unlike every other tier here — nothing in the polling loop
++        calls it yet; see that method's own docstring for exactly why.
+     - BLOCKED   — anything else on the pump: Allow Heating/Allow Additive
+         Heating, degree minutes, defrost parameters, climate setpoints.
+         Deliberately NOT implemented anywhere in this module, on purpose,
+@@ -96,6 +105,18 @@ DHW_COMFORT_MODE_LUXURY = "LUXURY"
+ DHW_COMFORT_MODE_ECONOMY = "ECONOMY"
+ DHW_COMFORT_MODE_NORMAL = "NORMAL"
+ 
++# EFFEKTVAKT tier (added 2026-10-05) — see module docstring's write-safety
++# classification section for why this is its own tier rather than folded
++# into EVERYDAY/GUARDED. Range matches number.max_int_add_power_47212's
++# own HA-reported min/max on Håkan's F750 (confirmed live 2026-10-05); the
++# register is continuous (step 0.01kW), not a fixed step selector, despite
++# "about three steps" being how a wired-up F-series internal electric
++# addition is often described (that refers to how many of the physical
++# resistive elements are wired, which this one Modbus register abstracts
++# over as a single kW ceiling).
++EFFEKTVAKT_MAX_POWER_MIN_KW = 0.0
++EFFEKTVAKT_MAX_POWER_MAX_KW = 45.0
++
+ 
+ class NibeController:
+     """Reads Nibe F750 heat-offset/DHW state and (when not in test mode) controls it."""
+@@ -106,6 +127,8 @@ class NibeController:
+         token: str,
+         heat_offset_entity: str,
+         dhw_comfort_mode_entity: str,
++        effektvakt_max_power_entity: str | None = None,
++        effektvakt_fuse_entity: str | None = None,
+         test_mode: bool = True,
+     ):
+         """Set up the controller.
+@@ -117,6 +140,16 @@ class NibeController:
+                 "number.heat_offset_s1_47011".
+             dhw_comfort_mode_entity: GUARDED-tier select, e.g.
+                 "select.hot_water_comfort_mode_47041".
++            effektvakt_max_power_entity: EFFEKTVAKT-tier number, e.g.
++                "number.max_int_add_power_47212". Optional (None disables
++                get_effektvakt_max_power_kw()/set_effektvakt_max_power_kw()
++                — both become no-ops) so existing callers/tests that don't
++                pass it keep working unchanged.
++            effektvakt_fuse_entity: read-only diagnostic number, e.g.
++                "number.fuse_47214" (the pump's own main-fuse-rating
++                input, the other half of its effektvakt function). Never
++                written by this class — informational only, for
++                get_effektvakt_fuse_rating_a().
+             test_mode: Start safe by default, same idiom as
+                 ZaptecController — a caller must explicitly pass False (or
+                 call set_test_mode(False) later) to allow real writes.
+@@ -127,6 +160,8 @@ class NibeController:
+             "Content-Type": "application/json",
+         }
+         self.heat_offset_entity = heat_offset_entity
++        self.effektvakt_max_power_entity = effektvakt_max_power_entity
++        self.effektvakt_fuse_entity = effektvakt_fuse_entity
+         self.dhw_comfort_mode_entity = dhw_comfort_mode_entity
+         self.test_mode = test_mode
+         self.session = requests.Session()
+@@ -182,6 +217,41 @@ class NibeController:
+         or None if unavailable. Confirmed live 2026-09-22."""
+         return self._get_raw_state(self.dhw_comfort_mode_entity)
+ 
++    def get_effektvakt_max_power_kw(self) -> float | None:
++        """EFFEKTVAKT tier read. Current number.max_int_add_power_47212
++        value (the pump's own cap on its internal electric backup heater),
++        or None if effektvakt_max_power_entity wasn't configured, or if the
++        register is unavailable. Confirmed live 2026-10-05: unavailable on
++        Håkan's F750 — effektvakt has never been turned on at the pump's
++        own control panel (no fuse size entered there), so there is
++        currently nothing for this to read."""
++        if self.effektvakt_max_power_entity is None:
++            return None
++        raw = self._get_raw_state(self.effektvakt_max_power_entity)
++        if raw is None:
++            return None
++        try:
++            return float(raw)
++        except ValueError:
++            return None
++
++    def get_effektvakt_fuse_rating_a(self) -> float | None:
++        """Read-only diagnostic. Current number.fuse_47214 value (the main
++        fuse rating entered at the pump's own panel, the input effektvakt
++        derives its power budget from) — never written by this class, see
++        effektvakt_fuse_entity's constructor docstring. None if not
++        configured or unavailable; confirmed live 2026-10-05: unavailable,
++        same reason as get_effektvakt_max_power_kw() above."""
++        if self.effektvakt_fuse_entity is None:
++            return None
++        raw = self._get_raw_state(self.effektvakt_fuse_entity)
++        if raw is None:
++            return None
++        try:
++            return float(raw)
++        except ValueError:
++            return None
++
+     # ------------------------------------------------------------------
+     # Writes — gated by test_mode, deny-by-default, same idiom as
+     # ZaptecController._call_service.
+@@ -225,6 +295,56 @@ class NibeController:
+             description=f"set {self.dhw_comfort_mode_entity} to {mode!r}",
+         )
+ 
++    def set_effektvakt_max_power_kw(self, max_power_kw: float) -> bool:
++        """EFFEKTVAKT tier. Writes number.max_int_add_power_47212 — caps
++        how much power the pump's own internal electric backup heater is
++        allowed to draw, independent of (and gentler than) the old
++        peak_power_governor.py pyscript's binary block switch, which
++        either let the whole element run or blocked it outright.
++
++        Clamped to [EFFEKTVAKT_MAX_POWER_MIN_KW, EFFEKTVAKT_MAX_POWER_MAX_KW]
++        regardless of what the caller passes, same defense-in-depth idiom
++        as set_heat_offset(). Returns False without any HA call if
++        effektvakt_max_power_entity wasn't configured — a caller doesn't
++        need its own None-check before calling this.
++
++        No automatic caller exists yet (see core/governor/peak_governor.py
++        and core/bess/settings_store.py's effektvakt_max_power_kw comment)
++        — as of 2026-10-05 this method exists and is safe to call, but
++        nothing in the polling loop calls it. Confirmed live the same day
++        that the underlying register is "unavailable" on Håkan's F750
++        regardless (effektvakt not turned on at the pump's own panel), so
++        even a direct call would currently return False via
++        test_mode=False's own request-failure path, not because of
++        anything in this method.
++        """
++        if self.effektvakt_max_power_entity is None:
++            logger.warning(
++                "set_effektvakt_max_power_kw(%s) called but no "
++                "effektvakt_max_power_entity configured — no-op",
++                max_power_kw,
++            )
++            return False
++        clamped = max(
++            EFFEKTVAKT_MAX_POWER_MIN_KW,
++            min(EFFEKTVAKT_MAX_POWER_MAX_KW, max_power_kw),
++        )
++        if clamped != max_power_kw:
++            logger.warning(
++                "set_effektvakt_max_power_kw(%s) clamped to %s (register range %s-%s)",
++                max_power_kw,
++                clamped,
++                EFFEKTVAKT_MAX_POWER_MIN_KW,
++                EFFEKTVAKT_MAX_POWER_MAX_KW,
++            )
++        return self._call_service(
++            domain="number",
++            service="set_value",
++            entity_id=self.effektvakt_max_power_entity,
++            data={"value": clamped},
++            description=f"set {self.effektvakt_max_power_entity} to {clamped}",
++        )
++
+     # ------------------------------------------------------------------
+     # Internals — identical shape to ZaptecController's, duplicated on
+     # purpose (see core/perific/reader.py's docstring for why).
+diff --git a/home_energy_manager/core/nibe/live.py b/home_energy_manager/core/nibe/live.py
+index eedfaa0..edb0d06 100644
+--- a/home_energy_manager/core/nibe/live.py
++++ b/home_energy_manager/core/nibe/live.py
+@@ -52,6 +52,16 @@ SUPPLY_PUMP_SPEED_ENTITY = "sensor.supply_pump_speed_ep14_43437"
+ EL_ADD_POWER_ENTITY = "sensor.int_el_add_power_43084"
+ DEGREE_MINUTES_ENTITY = "number.degree_minutes_16_bit_43005"
+ 
++# Added 2026-10-05 — the pump's own "effektvakt" (power-guard) settings,
++# for the dashboard's "what is effektvakt actually set to right now" ask.
++# See backend/app.py's NIBE_EFFEKTVAKT_MAX_POWER_ENTITY comment and
++# core/nibe/controller.py's EFFEKTVAKT tier for the full story. Confirmed
++# live 2026-10-05: both read as None here (register "unavailable") because
++# effektvakt has never been turned on at the pump's own panel — that is
++# the honest current setting, not a bug in this module.
++EFFEKTVAKT_MAX_POWER_ENTITY = "number.max_int_add_power_47212"
++EFFEKTVAKT_FUSE_ENTITY = "number.fuse_47214"
++
+ # Plain state (no attribute) reads. Climate/DHW are handled separately
+ # below since the values this page wants live in their *attributes*, not
+ # the bare `state` string (same split history.py makes).
+@@ -67,6 +77,8 @@ _PLAIN_STATE_ENTITIES = [
+     EL_ADD_POWER_ENTITY,
+     DEGREE_MINUTES_ENTITY,
+     HEAT_OFFSET_ENTITY,
++    EFFEKTVAKT_MAX_POWER_ENTITY,
++    EFFEKTVAKT_FUSE_ENTITY,
+ ]
+ 
+ # Numeric among the above — everything except Prio and Compressor State,
+@@ -81,6 +93,8 @@ _NUMERIC_ENTITIES = {
+     EL_ADD_POWER_ENTITY,
+     DEGREE_MINUTES_ENTITY,
+     HEAT_OFFSET_ENTITY,
++    EFFEKTVAKT_MAX_POWER_ENTITY,
++    EFFEKTVAKT_FUSE_ENTITY,
+ }
+ 
+ 
+@@ -163,6 +177,8 @@ def fetch_live_snapshot(base_url: str, headers: dict) -> dict:
+         "electricAdditionKw": state_of(EL_ADD_POWER_ENTITY),
+         "degreeMinutes": state_of(DEGREE_MINUTES_ENTITY),
+         "heatOffsetC": state_of(HEAT_OFFSET_ENTITY),
++        "effektvaktMaxPowerKw": state_of(EFFEKTVAKT_MAX_POWER_ENTITY),
++        "effektvaktFuseRatingA": state_of(EFFEKTVAKT_FUSE_ENTITY),
+         "indoorActualC": attr_of(climate, "current_temperature"),
+         "indoorTargetC": attr_of(climate, "temperature"),
+         "dhwActualC": attr_of(dhw, "current_temperature"),
+diff --git a/home_energy_manager/frontend/src/components/NibeLiveCard.tsx b/home_energy_manager/frontend/src/components/NibeLiveCard.tsx
+index 43fe24c..2d45d62 100644
+--- a/home_energy_manager/frontend/src/components/NibeLiveCard.tsx
++++ b/home_energy_manager/frontend/src/components/NibeLiveCard.tsx
+@@ -148,6 +148,22 @@ export default function NibeLiveCard() {
+         <Tile icon={Gauge} label="Kurvoffset, tillämpad" value={formatNumber(live.heatOffsetC, 0)} unit="°C" />
+       </div>
+ 
++      {/* Added 2026-10-05 — effektvakt (power-guard) current setting, read
++          straight from the pump. Both tiles show "—" whenever effektvakt
++          has never been turned on at the pump's own panel — see
++          useNibeLive's comment — which is the honest current state, not
++          a loading/error condition. */}
++      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
++        <Tile icon={Zap} label="Effektvakt, max eltillsats" value={formatNumber(live.effektvaktMaxPowerKw, 2)} unit="kW" />
++        <Tile icon={Gauge} label="Effektvakt, huvudsäkring" value={formatNumber(live.effektvaktFuseRatingA, 0)} unit="A" />
++      </div>
++      {live.effektvaktMaxPowerKw === null && live.effektvaktFuseRatingA === null && (
++        <p className="text-xs text-gray-400 dark:text-gray-500">
++          Effektvakt är inte påslagen på pumpens egen panel (ingen huvudsäkring angiven där) —
++          därför "—" ovan. Inställningen i Settings → Nibe F750 gör ingenting förrän den är på.
++        </p>
++      )}
++
+       {loading && live.prio === null && (
+         <div className="text-sm text-gray-400 dark:text-gray-500">Hämtar driftdata…</div>
+       )}
+diff --git a/home_energy_manager/frontend/src/hooks/useNibeLive.ts b/home_energy_manager/frontend/src/hooks/useNibeLive.ts
+index 7595e35..df2a912 100644
+--- a/home_energy_manager/frontend/src/hooks/useNibeLive.ts
++++ b/home_energy_manager/frontend/src/hooks/useNibeLive.ts
+@@ -38,6 +38,12 @@ export interface NibeLiveResponse {
+     dhwActualC: number | null;
+     dhwTargetHighC: number | null;
+     dhwTargetLowC: number | null;
++    // Added 2026-10-05 — the pump's own effektvakt (power-guard) inputs.
++    // Both null means effektvakt has never been turned on at the pump's
++    // own panel (confirmed live 2026-10-05) — an honest "not configured",
++    // not a read failure. See core/nibe/live.py's comment.
++    effektvaktMaxPowerKw: number | null;
++    effektvaktFuseRatingA: number | null;
+   };
+ }
+ 
+@@ -63,6 +69,8 @@ const EMPTY_LIVE: NibeLiveResponse = {
+     dhwActualC: null,
+     dhwTargetHighC: null,
+     dhwTargetLowC: null,
++    effektvaktMaxPowerKw: null,
++    effektvaktFuseRatingA: null,
+   },
+ };
+ 
+diff --git a/home_energy_manager/frontend/src/pages/SettingsPage.tsx b/home_energy_manager/frontend/src/pages/SettingsPage.tsx
+index 7f1319b..d00b450 100644
+--- a/home_energy_manager/frontend/src/pages/SettingsPage.tsx
++++ b/home_energy_manager/frontend/src/pages/SettingsPage.tsx
+@@ -92,6 +92,12 @@ const SettingsPage: React.FC = () => {
+   const [savedGovernorEnabled, setSavedGovernorEnabled] = useState(false);
+   const [governorTargetKw, setGovernorTargetKw] = useState(12.0);
+   const [savedGovernorTargetKw, setSavedGovernorTargetKw] = useState(12.0);
++  // Added 2026-10-05 — the ceiling peak_governor restores Zaptec's current
++  // toward when back under budget. Was hard-coded; see backend/app.py's
++  // ev_max_current_a comment. 16 matches Håkan's previously-confirmed
++  // real installation limit, not a code default picked arbitrarily here.
++  const [governorEvMaxCurrentA, setGovernorEvMaxCurrentA] = useState(16.0);
++  const [savedGovernorEvMaxCurrentA, setSavedGovernorEvMaxCurrentA] = useState(16.0);
+   // Fas 5c: EV price/SOC/solar scheduler. Same feature-flag reasoning as
+   // the governor above — no confirm dialog, ZaptecController's writes are
+   // already gated by demo_mode/test_mode. overrideRequested isn't a form
+@@ -116,6 +122,14 @@ const SettingsPage: React.FC = () => {
+   const [savedNibeCheapPricePercentile, setSavedNibeCheapPricePercentile] = useState(0.5);
+   const [nibeMinSolarSurplusKw, setNibeMinSolarSurplusKw] = useState(0.0);
+   const [savedNibeMinSolarSurplusKw, setSavedNibeMinSolarSurplusKw] = useState(0.0);
++  // Added 2026-10-05 — effektvakt (power-guard) max-power lever scaffolding.
++  // effektvaktGovernorEnabled has no automatic effect yet (nothing in the
++  // polling loop reads it) — see core/bess/settings_store.py's
++  // nibe.effektvakt_max_power_kw comment for the full story and why.
++  const [effektvaktGovernorEnabled, setEffektvaktGovernorEnabled] = useState(false);
++  const [savedEffektvaktGovernorEnabled, setSavedEffektvaktGovernorEnabled] = useState(false);
++  const [effektvaktMaxPowerKw, setEffektvaktMaxPowerKw] = useState(6.0);
++  const [savedEffektvaktMaxPowerKw, setSavedEffektvaktMaxPowerKw] = useState(6.0);
+ 
+   // ── saved snapshots (for dirty detection) ──────────────────────────────
+   const savedBattery = useRef<string>('');
+@@ -153,6 +167,7 @@ const SettingsPage: React.FC = () => {
+       JSON.stringify(aiForm) !== savedAi.current ||
+       governorEnabled !== savedGovernorEnabled ||
+       governorTargetKw !== savedGovernorTargetKw ||
++      governorEvMaxCurrentA !== savedGovernorEvMaxCurrentA ||
+       evSchedulerEnabled !== savedEvSchedulerEnabled ||
+       evSocCapPercent !== savedEvSocCapPercent ||
+       evLowPriceThresholdOre !== savedEvLowPriceThresholdOre ||
+@@ -160,7 +175,9 @@ const SettingsPage: React.FC = () => {
+       nibeEnabled !== savedNibeEnabled ||
+       nibeDhwLuxuryEnabled !== savedNibeDhwLuxuryEnabled ||
+       nibeCheapPricePercentile !== savedNibeCheapPricePercentile ||
+-      nibeMinSolarSurplusKw !== savedNibeMinSolarSurplusKw,
++      nibeMinSolarSurplusKw !== savedNibeMinSolarSurplusKw ||
++      effektvaktGovernorEnabled !== savedEffektvaktGovernorEnabled ||
++      effektvaktMaxPowerKw !== savedEffektvaktMaxPowerKw,
+   };
+ 
+   // ── loading / saving / error state ────────────────────────────────────
+@@ -299,6 +316,8 @@ const SettingsPage: React.FC = () => {
+       setSavedGovernorEnabled(gov.enabled ?? false);
+       setGovernorTargetKw(gov.targetKw ?? 12.0);
+       setSavedGovernorTargetKw(gov.targetKw ?? 12.0);
++      setGovernorEvMaxCurrentA(gov.evMaxCurrentA ?? 16.0);
++      setSavedGovernorEvMaxCurrentA(gov.evMaxCurrentA ?? 16.0);
+ 
+       const evSched = s.evScheduler ?? {};
+       setEvSchedulerEnabled(evSched.enabled ?? false);
+@@ -319,6 +338,10 @@ const SettingsPage: React.FC = () => {
+       setSavedNibeCheapPricePercentile(nibe.cheapPricePercentile ?? 0.5);
+       setNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
+       setSavedNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
++      setEffektvaktGovernorEnabled(nibe.effektvaktGovernorEnabled ?? false);
++      setSavedEffektvaktGovernorEnabled(nibe.effektvaktGovernorEnabled ?? false);
++      setEffektvaktMaxPowerKw(nibe.effektvaktMaxPowerKw ?? 6.0);
++      setSavedEffektvaktMaxPowerKw(nibe.effektvaktMaxPowerKw ?? 6.0);
+ 
+       if (healthRes.data?.checks) {
+         const map: Record<string, HealthStatus> = {};
+@@ -616,7 +639,11 @@ const SettingsPage: React.FC = () => {
+       await api.patch('/api/settings', {
+         demoMode: { enabled: demoEnabled },
+         aiAnalyst: aiForm,
+-        governor: { enabled: governorEnabled, targetKw: governorTargetKw },
++        governor: {
++          enabled: governorEnabled,
++          targetKw: governorTargetKw,
++          evMaxCurrentA: governorEvMaxCurrentA,
++        },
+         evScheduler: {
+           enabled: evSchedulerEnabled,
+           socCapPercent: evSocCapPercent,
+@@ -628,12 +655,15 @@ const SettingsPage: React.FC = () => {
+           dhwLuxuryEnabled: nibeDhwLuxuryEnabled,
+           cheapPricePercentile: nibeCheapPricePercentile,
+           minSolarSurplusKw: nibeMinSolarSurplusKw,
++          effektvaktGovernorEnabled: effektvaktGovernorEnabled,
++          effektvaktMaxPowerKw: effektvaktMaxPowerKw,
+         },
+       });
+       setSavedDemoEnabled(demoEnabled);
+       savedAi.current = JSON.stringify(aiForm);
+       setSavedGovernorEnabled(governorEnabled);
+       setSavedGovernorTargetKw(governorTargetKw);
++      setSavedGovernorEvMaxCurrentA(governorEvMaxCurrentA);
+       setSavedEvSchedulerEnabled(evSchedulerEnabled);
+       setSavedEvSocCapPercent(evSocCapPercent);
+       setSavedEvLowPriceThresholdOre(evLowPriceThresholdOre);
+@@ -642,6 +672,8 @@ const SettingsPage: React.FC = () => {
+       setSavedNibeDhwLuxuryEnabled(nibeDhwLuxuryEnabled);
+       setSavedNibeCheapPricePercentile(nibeCheapPricePercentile);
+       setSavedNibeMinSolarSurplusKw(nibeMinSolarSurplusKw);
++      setSavedEffektvaktGovernorEnabled(effektvaktGovernorEnabled);
++      setSavedEffektvaktMaxPowerKw(effektvaktMaxPowerKw);
+       window.dispatchEvent(new Event('bess:demo-mode-changed'));
+       setToast({ type: 'success', message: 'System settings saved.' });
+     } catch (err) {
+@@ -875,10 +907,20 @@ const SettingsPage: React.FC = () => {
+                   step: 0.5,
+                   unit: 'kW',
+                 })}
++                {numField(
++                  'Max laddström (normalläge)',
++                  governorEvMaxCurrentA,
++                  setGovernorEvMaxCurrentA,
++                  { min: 6, max: 20, step: 1, unit: 'A' },
++                )}
+                 <p className="text-xs text-gray-500 dark:text-gray-400">
+                   Denna brytare styr bara om Effektvakten är aktiv — den är inte samma sak som
+                   Demo Mode ovan. Är Demo Mode påslaget skickas ändå inga kommandon till Zaptec,
+-                  precis som för batteriet, eftersom båda delar samma säkerhetsspärr.
++                  precis som för batteriet, eftersom båda delar samma säkerhetsspärr. Max
++                  laddström är taket Effektvakten återställer mot när hushållet är under
++                  måleffekten igen — golvet är alltid 6 A (laddarens eget golv). Håkans tidigare
++                  bekräftade installationsgräns var 16 A/3-fas; högre än det är bara säkert om
++                  säkring/kabeldragning faktiskt klarar det.
+                 </p>
+               </SectionCard>
+ 
+@@ -931,6 +973,24 @@ const SettingsPage: React.FC = () => {
+                   setNibeMinSolarSurplusKw,
+                   { min: 0, max: 20, step: 0.1, unit: 'kW' },
+                 )}
++                {toggle(
++                  'Effektvakt-styrning (eltillsats)',
++                  effektvaktGovernorEnabled,
++                  setEffektvaktGovernorEnabled,
++                )}
++                {numField(
++                  'Effektvakt, max eltillsats',
++                  effektvaktMaxPowerKw,
++                  setEffektvaktMaxPowerKw,
++                  { min: 0, max: 45, step: 0.5, unit: 'kW' },
++                )}
++                <p className="text-xs text-gray-500 dark:text-gray-400">
++                  Effektvakt-styrning gör ännu ingenting automatiskt — bara inställningen finns,
++                  ingen kod läser den än (byggs som nästa steg om du vill). Och oavsett det: båda
++                  effektvakt-registren svarar "unavailable" på din F750 just nu, eftersom
++                  effektvakt aldrig slagits på på pumpens egen panel (ingen huvudsäkring angiven
++                  där) — se Nibe drift-sidan för live-avläsningen.
++                </p>
+               </SectionCard>
+ 
+               {/* AI Analyst */}
+-- 
+2.43.0
+
