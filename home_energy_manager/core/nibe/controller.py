@@ -37,6 +37,15 @@ THE WRITE-SAFETY CLASSIFICATION (design decision, 2026-09, revised 2026-09-22)
         human might also be changing by hand in the pump's own menu at the
         same time — worth distinguishing in logs/diagnostics from the
         curve-offset lever above. Implemented below.
+    - EFFEKTVAKT — number.max_int_add_power_47212 (cap on the internal
+        electric backup heater, part of the pump's own "effektvakt"
+        power-guard function). Added 2026-10-05 as its own tier, same
+        reasoning as GUARDED: it's a real safety-relevant power limit a
+        human might also be adjusting via the pump's own panel, distinct
+        enough from the curve-offset comfort lever to want separate
+        logging/diagnostics. Implemented below (set_effektvakt_max_power_kw),
+        but — unlike every other tier here — nothing in the polling loop
+        calls it yet; see that method's own docstring for exactly why.
     - BLOCKED   — anything else on the pump: Allow Heating/Allow Additive
         Heating, degree minutes, defrost parameters, climate setpoints.
         Deliberately NOT implemented anywhere in this module, on purpose,
@@ -96,6 +105,18 @@ DHW_COMFORT_MODE_LUXURY = "LUXURY"
 DHW_COMFORT_MODE_ECONOMY = "ECONOMY"
 DHW_COMFORT_MODE_NORMAL = "NORMAL"
 
+# EFFEKTVAKT tier (added 2026-10-05) — see module docstring's write-safety
+# classification section for why this is its own tier rather than folded
+# into EVERYDAY/GUARDED. Range matches number.max_int_add_power_47212's
+# own HA-reported min/max on Håkan's F750 (confirmed live 2026-10-05); the
+# register is continuous (step 0.01kW), not a fixed step selector, despite
+# "about three steps" being how a wired-up F-series internal electric
+# addition is often described (that refers to how many of the physical
+# resistive elements are wired, which this one Modbus register abstracts
+# over as a single kW ceiling).
+EFFEKTVAKT_MAX_POWER_MIN_KW = 0.0
+EFFEKTVAKT_MAX_POWER_MAX_KW = 45.0
+
 
 class NibeController:
     """Reads Nibe F750 heat-offset/DHW state and (when not in test mode) controls it."""
@@ -106,6 +127,8 @@ class NibeController:
         token: str,
         heat_offset_entity: str,
         dhw_comfort_mode_entity: str,
+        effektvakt_max_power_entity: str | None = None,
+        effektvakt_fuse_entity: str | None = None,
         test_mode: bool = True,
     ):
         """Set up the controller.
@@ -117,6 +140,16 @@ class NibeController:
                 "number.heat_offset_s1_47011".
             dhw_comfort_mode_entity: GUARDED-tier select, e.g.
                 "select.hot_water_comfort_mode_47041".
+            effektvakt_max_power_entity: EFFEKTVAKT-tier number, e.g.
+                "number.max_int_add_power_47212". Optional (None disables
+                get_effektvakt_max_power_kw()/set_effektvakt_max_power_kw()
+                — both become no-ops) so existing callers/tests that don't
+                pass it keep working unchanged.
+            effektvakt_fuse_entity: read-only diagnostic number, e.g.
+                "number.fuse_47214" (the pump's own main-fuse-rating
+                input, the other half of its effektvakt function). Never
+                written by this class — informational only, for
+                get_effektvakt_fuse_rating_a().
             test_mode: Start safe by default, same idiom as
                 ZaptecController — a caller must explicitly pass False (or
                 call set_test_mode(False) later) to allow real writes.
@@ -127,6 +160,8 @@ class NibeController:
             "Content-Type": "application/json",
         }
         self.heat_offset_entity = heat_offset_entity
+        self.effektvakt_max_power_entity = effektvakt_max_power_entity
+        self.effektvakt_fuse_entity = effektvakt_fuse_entity
         self.dhw_comfort_mode_entity = dhw_comfort_mode_entity
         self.test_mode = test_mode
         self.session = requests.Session()
@@ -182,6 +217,41 @@ class NibeController:
         or None if unavailable. Confirmed live 2026-09-22."""
         return self._get_raw_state(self.dhw_comfort_mode_entity)
 
+    def get_effektvakt_max_power_kw(self) -> float | None:
+        """EFFEKTVAKT tier read. Current number.max_int_add_power_47212
+        value (the pump's own cap on its internal electric backup heater),
+        or None if effektvakt_max_power_entity wasn't configured, or if the
+        register is unavailable. Confirmed live 2026-10-05: unavailable on
+        Håkan's F750 — effektvakt has never been turned on at the pump's
+        own control panel (no fuse size entered there), so there is
+        currently nothing for this to read."""
+        if self.effektvakt_max_power_entity is None:
+            return None
+        raw = self._get_raw_state(self.effektvakt_max_power_entity)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    def get_effektvakt_fuse_rating_a(self) -> float | None:
+        """Read-only diagnostic. Current number.fuse_47214 value (the main
+        fuse rating entered at the pump's own panel, the input effektvakt
+        derives its power budget from) — never written by this class, see
+        effektvakt_fuse_entity's constructor docstring. None if not
+        configured or unavailable; confirmed live 2026-10-05: unavailable,
+        same reason as get_effektvakt_max_power_kw() above."""
+        if self.effektvakt_fuse_entity is None:
+            return None
+        raw = self._get_raw_state(self.effektvakt_fuse_entity)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
     # ------------------------------------------------------------------
     # Writes — gated by test_mode, deny-by-default, same idiom as
     # ZaptecController._call_service.
@@ -223,6 +293,56 @@ class NibeController:
             entity_id=self.dhw_comfort_mode_entity,
             data={"option": mode},
             description=f"set {self.dhw_comfort_mode_entity} to {mode!r}",
+        )
+
+    def set_effektvakt_max_power_kw(self, max_power_kw: float) -> bool:
+        """EFFEKTVAKT tier. Writes number.max_int_add_power_47212 — caps
+        how much power the pump's own internal electric backup heater is
+        allowed to draw, independent of (and gentler than) the old
+        peak_power_governor.py pyscript's binary block switch, which
+        either let the whole element run or blocked it outright.
+
+        Clamped to [EFFEKTVAKT_MAX_POWER_MIN_KW, EFFEKTVAKT_MAX_POWER_MAX_KW]
+        regardless of what the caller passes, same defense-in-depth idiom
+        as set_heat_offset(). Returns False without any HA call if
+        effektvakt_max_power_entity wasn't configured — a caller doesn't
+        need its own None-check before calling this.
+
+        No automatic caller exists yet (see core/governor/peak_governor.py
+        and core/bess/settings_store.py's effektvakt_max_power_kw comment)
+        — as of 2026-10-05 this method exists and is safe to call, but
+        nothing in the polling loop calls it. Confirmed live the same day
+        that the underlying register is "unavailable" on Håkan's F750
+        regardless (effektvakt not turned on at the pump's own panel), so
+        even a direct call would currently return False via
+        test_mode=False's own request-failure path, not because of
+        anything in this method.
+        """
+        if self.effektvakt_max_power_entity is None:
+            logger.warning(
+                "set_effektvakt_max_power_kw(%s) called but no "
+                "effektvakt_max_power_entity configured — no-op",
+                max_power_kw,
+            )
+            return False
+        clamped = max(
+            EFFEKTVAKT_MAX_POWER_MIN_KW,
+            min(EFFEKTVAKT_MAX_POWER_MAX_KW, max_power_kw),
+        )
+        if clamped != max_power_kw:
+            logger.warning(
+                "set_effektvakt_max_power_kw(%s) clamped to %s (register range %s-%s)",
+                max_power_kw,
+                clamped,
+                EFFEKTVAKT_MAX_POWER_MIN_KW,
+                EFFEKTVAKT_MAX_POWER_MAX_KW,
+            )
+        return self._call_service(
+            domain="number",
+            service="set_value",
+            entity_id=self.effektvakt_max_power_entity,
+            data={"value": clamped},
+            description=f"set {self.effektvakt_max_power_entity} to {clamped}",
         )
 
     # ------------------------------------------------------------------

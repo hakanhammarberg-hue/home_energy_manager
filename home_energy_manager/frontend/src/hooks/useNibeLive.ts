@@ -38,6 +38,12 @@ export interface NibeLiveResponse {
     dhwActualC: number | null;
     dhwTargetHighC: number | null;
     dhwTargetLowC: number | null;
+    // Added 2026-10-05 — the pump's own effektvakt (power-guard) inputs.
+    // Both null means effektvakt has never been turned on at the pump's
+    // own panel (confirmed live 2026-10-05) — an honest "not configured",
+    // not a read failure. See core/nibe/live.py's comment.
+    effektvaktMaxPowerKw: number | null;
+    effektvaktFuseRatingA: number | null;
   };
 }
 
@@ -63,6 +69,8 @@ const EMPTY_LIVE: NibeLiveResponse = {
     dhwActualC: null,
     dhwTargetHighC: null,
     dhwTargetLowC: null,
+    effektvaktMaxPowerKw: null,
+    effektvaktFuseRatingA: null,
   },
 };
 

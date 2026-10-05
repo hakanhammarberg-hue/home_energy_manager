@@ -45,11 +45,17 @@ def _status_payload(bess_controller: Any) -> dict:
         "status": decision.status if decision is not None else None,
         "chargingAllowed": decision.charging_allowed if decision is not None else None,
         "reason": decision.reason if decision is not None else None,
-        # Added 2026-09-29: the car's own ground truth, independent of
-        # `enabled`/`status`/`chargingAllowed` above (which are all about
-        # whether THIS APP is gating charging) — see app.py's
-        # _poll_ev_charging for why these three are read every tick
-        # regardless of the ev_scheduler feature toggle.
+        # Added 2026-09-29: ground truth independent of `enabled`/`status`/
+        # `chargingAllowed` above (which are all about whether THIS APP is
+        # gating charging) — see app.py's _poll_ev_charging for why these
+        # three are read every tick regardless of the ev_scheduler feature
+        # toggle. FIXED 2026-10-05: this was the car's own kia_uvo flag
+        # (binary_sensor.ev3_ev_battery_charge), which fed the dashboard's
+        # "Zaptec Go 2" tile despite being a different vendor/device than
+        # the charger that tile is named and pictured after. Now sourced
+        # from binary_sensor.ev_laddar_zaptec — the charger's own session
+        # state — so this field means what the tile says it means. See
+        # app.py's ZAPTEC_CHARGING_ACTIVE_ENTITY comment for the full story.
         "chargingActive": getattr(bess_controller, "ev_last_charging_active", None),
         "estimatedChargeDurationMin": getattr(
             bess_controller, "ev_last_charge_duration_min", None

@@ -92,6 +92,12 @@ const SettingsPage: React.FC = () => {
   const [savedGovernorEnabled, setSavedGovernorEnabled] = useState(false);
   const [governorTargetKw, setGovernorTargetKw] = useState(12.0);
   const [savedGovernorTargetKw, setSavedGovernorTargetKw] = useState(12.0);
+  // Added 2026-10-05 — the ceiling peak_governor restores Zaptec's current
+  // toward when back under budget. Was hard-coded; see backend/app.py's
+  // ev_max_current_a comment. 16 matches Håkan's previously-confirmed
+  // real installation limit, not a code default picked arbitrarily here.
+  const [governorEvMaxCurrentA, setGovernorEvMaxCurrentA] = useState(16.0);
+  const [savedGovernorEvMaxCurrentA, setSavedGovernorEvMaxCurrentA] = useState(16.0);
   // Fas 5c: EV price/SOC/solar scheduler. Same feature-flag reasoning as
   // the governor above — no confirm dialog, ZaptecController's writes are
   // already gated by demo_mode/test_mode. overrideRequested isn't a form
@@ -116,6 +122,14 @@ const SettingsPage: React.FC = () => {
   const [savedNibeCheapPricePercentile, setSavedNibeCheapPricePercentile] = useState(0.5);
   const [nibeMinSolarSurplusKw, setNibeMinSolarSurplusKw] = useState(0.0);
   const [savedNibeMinSolarSurplusKw, setSavedNibeMinSolarSurplusKw] = useState(0.0);
+  // Added 2026-10-05 — effektvakt (power-guard) max-power lever scaffolding.
+  // effektvaktGovernorEnabled has no automatic effect yet (nothing in the
+  // polling loop reads it) — see core/bess/settings_store.py's
+  // nibe.effektvakt_max_power_kw comment for the full story and why.
+  const [effektvaktGovernorEnabled, setEffektvaktGovernorEnabled] = useState(false);
+  const [savedEffektvaktGovernorEnabled, setSavedEffektvaktGovernorEnabled] = useState(false);
+  const [effektvaktMaxPowerKw, setEffektvaktMaxPowerKw] = useState(6.0);
+  const [savedEffektvaktMaxPowerKw, setSavedEffektvaktMaxPowerKw] = useState(6.0);
 
   // ── saved snapshots (for dirty detection) ──────────────────────────────
   const savedBattery = useRef<string>('');
@@ -153,6 +167,7 @@ const SettingsPage: React.FC = () => {
       JSON.stringify(aiForm) !== savedAi.current ||
       governorEnabled !== savedGovernorEnabled ||
       governorTargetKw !== savedGovernorTargetKw ||
+      governorEvMaxCurrentA !== savedGovernorEvMaxCurrentA ||
       evSchedulerEnabled !== savedEvSchedulerEnabled ||
       evSocCapPercent !== savedEvSocCapPercent ||
       evLowPriceThresholdOre !== savedEvLowPriceThresholdOre ||
@@ -160,7 +175,9 @@ const SettingsPage: React.FC = () => {
       nibeEnabled !== savedNibeEnabled ||
       nibeDhwLuxuryEnabled !== savedNibeDhwLuxuryEnabled ||
       nibeCheapPricePercentile !== savedNibeCheapPricePercentile ||
-      nibeMinSolarSurplusKw !== savedNibeMinSolarSurplusKw,
+      nibeMinSolarSurplusKw !== savedNibeMinSolarSurplusKw ||
+      effektvaktGovernorEnabled !== savedEffektvaktGovernorEnabled ||
+      effektvaktMaxPowerKw !== savedEffektvaktMaxPowerKw,
   };
 
   // ── loading / saving / error state ────────────────────────────────────
@@ -299,6 +316,8 @@ const SettingsPage: React.FC = () => {
       setSavedGovernorEnabled(gov.enabled ?? false);
       setGovernorTargetKw(gov.targetKw ?? 12.0);
       setSavedGovernorTargetKw(gov.targetKw ?? 12.0);
+      setGovernorEvMaxCurrentA(gov.evMaxCurrentA ?? 16.0);
+      setSavedGovernorEvMaxCurrentA(gov.evMaxCurrentA ?? 16.0);
 
       const evSched = s.evScheduler ?? {};
       setEvSchedulerEnabled(evSched.enabled ?? false);
@@ -319,6 +338,10 @@ const SettingsPage: React.FC = () => {
       setSavedNibeCheapPricePercentile(nibe.cheapPricePercentile ?? 0.5);
       setNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
       setSavedNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
+      setEffektvaktGovernorEnabled(nibe.effektvaktGovernorEnabled ?? false);
+      setSavedEffektvaktGovernorEnabled(nibe.effektvaktGovernorEnabled ?? false);
+      setEffektvaktMaxPowerKw(nibe.effektvaktMaxPowerKw ?? 6.0);
+      setSavedEffektvaktMaxPowerKw(nibe.effektvaktMaxPowerKw ?? 6.0);
 
       if (healthRes.data?.checks) {
         const map: Record<string, HealthStatus> = {};
@@ -616,7 +639,11 @@ const SettingsPage: React.FC = () => {
       await api.patch('/api/settings', {
         demoMode: { enabled: demoEnabled },
         aiAnalyst: aiForm,
-        governor: { enabled: governorEnabled, targetKw: governorTargetKw },
+        governor: {
+          enabled: governorEnabled,
+          targetKw: governorTargetKw,
+          evMaxCurrentA: governorEvMaxCurrentA,
+        },
         evScheduler: {
           enabled: evSchedulerEnabled,
           socCapPercent: evSocCapPercent,
@@ -628,12 +655,15 @@ const SettingsPage: React.FC = () => {
           dhwLuxuryEnabled: nibeDhwLuxuryEnabled,
           cheapPricePercentile: nibeCheapPricePercentile,
           minSolarSurplusKw: nibeMinSolarSurplusKw,
+          effektvaktGovernorEnabled: effektvaktGovernorEnabled,
+          effektvaktMaxPowerKw: effektvaktMaxPowerKw,
         },
       });
       setSavedDemoEnabled(demoEnabled);
       savedAi.current = JSON.stringify(aiForm);
       setSavedGovernorEnabled(governorEnabled);
       setSavedGovernorTargetKw(governorTargetKw);
+      setSavedGovernorEvMaxCurrentA(governorEvMaxCurrentA);
       setSavedEvSchedulerEnabled(evSchedulerEnabled);
       setSavedEvSocCapPercent(evSocCapPercent);
       setSavedEvLowPriceThresholdOre(evLowPriceThresholdOre);
@@ -642,6 +672,8 @@ const SettingsPage: React.FC = () => {
       setSavedNibeDhwLuxuryEnabled(nibeDhwLuxuryEnabled);
       setSavedNibeCheapPricePercentile(nibeCheapPricePercentile);
       setSavedNibeMinSolarSurplusKw(nibeMinSolarSurplusKw);
+      setSavedEffektvaktGovernorEnabled(effektvaktGovernorEnabled);
+      setSavedEffektvaktMaxPowerKw(effektvaktMaxPowerKw);
       window.dispatchEvent(new Event('bess:demo-mode-changed'));
       setToast({ type: 'success', message: 'System settings saved.' });
     } catch (err) {
@@ -875,10 +907,20 @@ const SettingsPage: React.FC = () => {
                   step: 0.5,
                   unit: 'kW',
                 })}
+                {numField(
+                  'Max laddström (normalläge)',
+                  governorEvMaxCurrentA,
+                  setGovernorEvMaxCurrentA,
+                  { min: 6, max: 20, step: 1, unit: 'A' },
+                )}
                 <p className="text-xs text-gray-500 dark:text-gray-400">
                   Denna brytare styr bara om Effektvakten är aktiv — den är inte samma sak som
                   Demo Mode ovan. Är Demo Mode påslaget skickas ändå inga kommandon till Zaptec,
-                  precis som för batteriet, eftersom båda delar samma säkerhetsspärr.
+                  precis som för batteriet, eftersom båda delar samma säkerhetsspärr. Max
+                  laddström är taket Effektvakten återställer mot när hushållet är under
+                  måleffekten igen — golvet är alltid 6 A (laddarens eget golv). Håkans tidigare
+                  bekräftade installationsgräns var 16 A/3-fas; högre än det är bara säkert om
+                  säkring/kabeldragning faktiskt klarar det.
                 </p>
               </SectionCard>
 
@@ -931,6 +973,24 @@ const SettingsPage: React.FC = () => {
                   setNibeMinSolarSurplusKw,
                   { min: 0, max: 20, step: 0.1, unit: 'kW' },
                 )}
+                {toggle(
+                  'Effektvakt-styrning (eltillsats)',
+                  effektvaktGovernorEnabled,
+                  setEffektvaktGovernorEnabled,
+                )}
+                {numField(
+                  'Effektvakt, max eltillsats',
+                  effektvaktMaxPowerKw,
+                  setEffektvaktMaxPowerKw,
+                  { min: 0, max: 45, step: 0.5, unit: 'kW' },
+                )}
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Effektvakt-styrning gör ännu ingenting automatiskt — bara inställningen finns,
+                  ingen kod läser den än (byggs som nästa steg om du vill). Och oavsett det: båda
+                  effektvakt-registren svarar "unavailable" på din F750 just nu, eftersom
+                  effektvakt aldrig slagits på på pumpens egen panel (ingen huvudsäkring angiven
+                  där) — se Nibe drift-sidan för live-avläsningen.
+                </p>
               </SectionCard>
 
               {/* AI Analyst */}

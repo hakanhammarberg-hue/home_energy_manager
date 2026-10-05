@@ -52,6 +52,16 @@ SUPPLY_PUMP_SPEED_ENTITY = "sensor.supply_pump_speed_ep14_43437"
 EL_ADD_POWER_ENTITY = "sensor.int_el_add_power_43084"
 DEGREE_MINUTES_ENTITY = "number.degree_minutes_16_bit_43005"
 
+# Added 2026-10-05 — the pump's own "effektvakt" (power-guard) settings,
+# for the dashboard's "what is effektvakt actually set to right now" ask.
+# See backend/app.py's NIBE_EFFEKTVAKT_MAX_POWER_ENTITY comment and
+# core/nibe/controller.py's EFFEKTVAKT tier for the full story. Confirmed
+# live 2026-10-05: both read as None here (register "unavailable") because
+# effektvakt has never been turned on at the pump's own panel — that is
+# the honest current setting, not a bug in this module.
+EFFEKTVAKT_MAX_POWER_ENTITY = "number.max_int_add_power_47212"
+EFFEKTVAKT_FUSE_ENTITY = "number.fuse_47214"
+
 # Plain state (no attribute) reads. Climate/DHW are handled separately
 # below since the values this page wants live in their *attributes*, not
 # the bare `state` string (same split history.py makes).
@@ -67,6 +77,8 @@ _PLAIN_STATE_ENTITIES = [
     EL_ADD_POWER_ENTITY,
     DEGREE_MINUTES_ENTITY,
     HEAT_OFFSET_ENTITY,
+    EFFEKTVAKT_MAX_POWER_ENTITY,
+    EFFEKTVAKT_FUSE_ENTITY,
 ]
 
 # Numeric among the above — everything except Prio and Compressor State,
@@ -81,6 +93,8 @@ _NUMERIC_ENTITIES = {
     EL_ADD_POWER_ENTITY,
     DEGREE_MINUTES_ENTITY,
     HEAT_OFFSET_ENTITY,
+    EFFEKTVAKT_MAX_POWER_ENTITY,
+    EFFEKTVAKT_FUSE_ENTITY,
 }
 
 
@@ -163,6 +177,8 @@ def fetch_live_snapshot(base_url: str, headers: dict) -> dict:
         "electricAdditionKw": state_of(EL_ADD_POWER_ENTITY),
         "degreeMinutes": state_of(DEGREE_MINUTES_ENTITY),
         "heatOffsetC": state_of(HEAT_OFFSET_ENTITY),
+        "effektvaktMaxPowerKw": state_of(EFFEKTVAKT_MAX_POWER_ENTITY),
+        "effektvaktFuseRatingA": state_of(EFFEKTVAKT_FUSE_ENTITY),
         "indoorActualC": attr_of(climate, "current_temperature"),
         "indoorTargetC": attr_of(climate, "temperature"),
         "dhwActualC": attr_of(dhw, "current_temperature"),

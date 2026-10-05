@@ -70,17 +70,31 @@ EV_SOC_ENTITY = "sensor.ev3_ev_battery_level"
 EV_PLUG_ENTITY = "binary_sensor.ev3_ev_battery_plug"
 
 # Added 2026-09-29 for the dashboard's "when will Kian be full" ask.
-# EV_CHARGING_ENTITY is the car's own is-actually-charging flag — distinct
-# from EV_PLUG_ENTITY (plugged in, which can be true while paused/full) and
-# from the ev_scheduler's own chargingAllowed (the app's decision, which can
-# be true while the car itself isn't drawing power, e.g. not plugged in).
 # EV_CHARGE_DURATION_ENTITY is kia_uvo's own "Estimated Charge Duration"
 # (minutes, via the currently connected charger) — the car's own BMS
 # estimate of time-to-target, which already accounts for charge-curve
 # tapering near full and isn't something worth re-deriving from
 # power/capacity here.
-EV_CHARGING_ENTITY = "binary_sensor.ev3_ev_battery_charge"
 EV_CHARGE_DURATION_ENTITY = "sensor.ev3_estimated_charge_duration"
+
+# FIXED 2026-10-05 — was binary_sensor.ev3_ev_battery_charge (the car's own
+# kia_uvo is-actually-charging flag). That's wrong for this field's actual
+# consumer: the dashboard's "Zaptec Go 2" tile (CompactStatusRow.tsx),
+# which is titled and imaged as the CHARGER, not the car. The car's own
+# flag and the charger's own session state are independent (different
+# vendors/integrations, different poll cadence) and can briefly disagree —
+# exactly the same class of bug already found and fixed once in this
+# project for discharge_inhibit (see git history, 2026-09-27): a raw
+# enum-valued sensor (sensor.gpn049831_laddstatus, values like
+# "connected_charging"/"disconnected") compared against the literal string
+# "on" never actually matches. binary_sensor.ev_laddar_zaptec is the
+# existing HA template helper that already does that comparison correctly
+# ({{ states('sensor.gpn049831_laddstatus') == 'connected_charging' }},
+# device_class battery_charging) — confirmed live 2026-10-05, state "on"
+# while a charging session is active. Using it here instead of either the
+# car's flag or a second ad-hoc comparison keeps exactly one place in HA
+# that encodes "is the Zaptec actually charging".
+ZAPTEC_CHARGING_ACTIVE_ENTITY = "binary_sensor.ev_laddar_zaptec"
 
 # Added 2026-09-30 for the compact dashboard row's "is it actually charging,
 # and at what power" ask (Håkan: "Laddningsrutan för elbil kan berätta om
@@ -107,6 +121,17 @@ EV_CHARGING_POWER_ENTITY = "sensor.gpn049831_laddeffekt"
 # Still open: no watchdog yet, blocking this running with demo_mode off.
 NIBE_HEAT_OFFSET_ENTITY = "number.heat_offset_s1_47011"
 NIBE_DHW_COMFORT_MODE_ENTITY = "select.hot_water_comfort_mode_47041"
+
+# Added 2026-10-05 — the pump's own "effektvakt" (power-guard) registers.
+# Both were disabled_by="integration" (never enabled before); enabled + the
+# nibe_heatpump config entry reloaded 2026-10-05, same pattern as every
+# other register above. Both confirmed "unavailable" after that —
+# effektvakt has never been turned on at the pump's own panel (no fuse
+# size entered there). See core/nibe/controller.py's EFFEKTVAKT tier and
+# core/bess/settings_store.py's nibe.effektvakt_max_power_kw comment for
+# the full story and current status.
+NIBE_EFFEKTVAKT_MAX_POWER_ENTITY = "number.max_int_add_power_47212"
+NIBE_EFFEKTVAKT_FUSE_ENTITY = "number.fuse_47214"
 
 # Fas 4d (2026-09-26): degree-minutes floor input — see
 # core/nibe/decision.py's FOURTH LEVER section. Read-only, a raw
@@ -544,6 +569,8 @@ class BESSController:
             token=ha_token,
             heat_offset_entity=NIBE_HEAT_OFFSET_ENTITY,
             dhw_comfort_mode_entity=NIBE_DHW_COMFORT_MODE_ENTITY,
+            effektvakt_max_power_entity=NIBE_EFFEKTVAKT_MAX_POWER_ENTITY,
+            effektvakt_fuse_entity=NIBE_EFFEKTVAKT_FUSE_ENTITY,
         )
 
     def set_demo_mode(self, enabled: bool) -> None:
@@ -650,7 +677,7 @@ class BESSController:
         plug_raw = self._read_raw_entity_state(EV_PLUG_ENTITY)
         plug_connected = None if plug_raw is None else plug_raw == "on"
 
-        charging_raw = self._read_raw_entity_state(EV_CHARGING_ENTITY)
+        charging_raw = self._read_raw_entity_state(ZAPTEC_CHARGING_ACTIVE_ENTITY)
         self.ev_last_charging_active = None if charging_raw is None else charging_raw == "on"
 
         duration_raw = self._read_raw_entity_state(EV_CHARGE_DURATION_ENTITY)
@@ -891,6 +918,12 @@ class BESSController:
             return
 
         target_kw = governor_settings.get("target_kw", peak_governor.DEFAULT_TARGET_KW)
+        # Added 2026-10-05 — was hard-coded to peak_governor's own
+        # ZAPTEC_NORMAL_MAX_CURRENT module constant (16A) before this;
+        # see settings_store.py's governor.ev_max_current_a comment.
+        ev_max_current_a = governor_settings.get(
+            "ev_max_current_a", peak_governor.ZAPTEC_NORMAL_MAX_CURRENT
+        )
         current_kw = self.perific_reader.get_power_total_kw()
         ev_current_a = self.zaptec_controller.get_available_current_a()
         charging_switch_on = self.zaptec_controller.get_charging_switch_on()
@@ -910,6 +943,7 @@ class BESSController:
             target_kw=target_kw,
             ev_current_a=ev_current_a,
             charging_switch_on=charging_switch_on,
+            normal_max_current=ev_max_current_a,
         )
 
         if decision.ev_current_target_a is not None:

@@ -148,6 +148,22 @@ export default function NibeLiveCard() {
         <Tile icon={Gauge} label="Kurvoffset, tillämpad" value={formatNumber(live.heatOffsetC, 0)} unit="°C" />
       </div>
 
+      {/* Added 2026-10-05 — effektvakt (power-guard) current setting, read
+          straight from the pump. Both tiles show "—" whenever effektvakt
+          has never been turned on at the pump's own panel — see
+          useNibeLive's comment — which is the honest current state, not
+          a loading/error condition. */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <Tile icon={Zap} label="Effektvakt, max eltillsats" value={formatNumber(live.effektvaktMaxPowerKw, 2)} unit="kW" />
+        <Tile icon={Gauge} label="Effektvakt, huvudsäkring" value={formatNumber(live.effektvaktFuseRatingA, 0)} unit="A" />
+      </div>
+      {live.effektvaktMaxPowerKw === null && live.effektvaktFuseRatingA === null && (
+        <p className="text-xs text-gray-400 dark:text-gray-500">
+          Effektvakt är inte påslagen på pumpens egen panel (ingen huvudsäkring angiven där) —
+          därför "—" ovan. Inställningen i Settings → Nibe F750 gör ingenting förrän den är på.
+        </p>
+      )}
+
       {loading && live.prio === null && (
         <div className="text-sm text-gray-400 dark:text-gray-500">Hämtar driftdata…</div>
       )}

@@ -588,7 +588,20 @@ class SettingsStore:
             # max, 12kW leaves margin). Not imported from there to avoid a
             # backend/core.bess → core.governor dependency for one constant;
             # if the two ever need to drift apart, that's worth noticing.
-            "governor": {"enabled": False, "target_kw": 12.0},
+            #
+            # ev_max_current_a added 2026-10-05 — the ceiling peak_governor
+            # restores Zaptec's charging current toward when household load
+            # is back under budget (previously hard-coded to
+            # core.governor.peak_governor.ZAPTEC_NORMAL_MAX_CURRENT = 16,
+            # Håkan's own confirmed 16A/3-phase wiring limit). Now
+            # settings-driven so he can raise it without a code change;
+            # bounded 6-20A in backend/api.py (6 matches
+            # number.gpn049831_min_laddstrom, the charger's own floor — see
+            # core.zaptec.controller.ZAPTEC_FLOOR_CURRENT). Default kept at
+            # 16, his previously-confirmed real installation limit — going
+            # above it is only safe if his circuit/breaker is actually
+            # rated for it; this setting doesn't know that and won't warn.
+            "governor": {"enabled": False, "target_kw": 12.0, "ev_max_current_a": 16.0},
             # Fas 5b (2026-08-31) — off by default, same as governor. Values
             # match core.zaptec.scheduler's DEFAULT_* constants (not imported,
             # same reasoning as governor's target_kw comment above: avoid a
@@ -654,6 +667,37 @@ class SettingsStore:
                 "heat_offset_reduction_c": -2,
                 "upgrade_cooldown_s": 1200.0,
                 "max_continuous_economy_s": 259200.0,
+                # Added 2026-10-05 — Håkan asked for a Nibe "max allowed
+                # power" setting, modelled on the pump's own "effektvakt"
+                # (power-guard) function. Investigated live against his
+                # F750: effektvakt is driven by two Modbus registers,
+                # number.fuse_47214 (main fuse rating, 1-400A) and
+                # number.max_int_add_power_47212 (cap on the internal
+                # electric backup heater, 0-45kW, continuous — NOT a fixed
+                # 2-3-step selector, despite that being a common F-series
+                # wiring pattern). Both were disabled_by="integration" in
+                # HA's registry (never enabled before); enabled + the
+                # nibe_heatpump config entry reloaded 2026-10-05, same
+                # pattern as every other register in this file's history.
+                # Confirmed CURRENT STATE: both still read "unavailable"
+                # after that — effektvakt itself has never been turned on
+                # at the pump's own control panel (no fuse size entered),
+                # so there is nothing running to cap yet. This setting and
+                # effektvakt_governor_enabled below are the scaffolding
+                # (validated, ready to use) for the day it is turned on;
+                # see core/nibe/controller.py's EFFEKTVAKT tier and
+                # core/nibe/live.py's fuseRatingA/effektvaktMaxPowerKw for
+                # the read side. No automatic write path is wired into the
+                # governor polling loop yet — that is a deliberate,
+                # separate next step (same "capability now, decision logic
+                # later" split as every other lever in this file), not
+                # built in this pass. 6.0 is an explicitly unconfirmed
+                # guess (same honest flagging as degree_minutes_floor
+                # above) — a typical single-step size for an F-series
+                # internal electric addition, not a measured value for
+                # Håkan's own installation.
+                "effektvakt_governor_enabled": False,
+                "effektvakt_max_power_kw": 6.0,
             },
         }
 
@@ -904,8 +948,22 @@ class SettingsStore:
 
         # --- governor section (added Fas 3b, 2026-08-30) ---
         if "governor" not in self.data:
-            self.data["governor"] = {"enabled": False, "target_kw": 12.0}
+            self.data["governor"] = {
+                "enabled": False,
+                "target_kw": 12.0,
+                "ev_max_current_a": 16.0,
+            }
             changed = True
+        elif isinstance(self.data.get("governor"), dict):
+            # ev_max_current_a added 2026-10-05 — backfill for existing
+            # installs so peak_governor's restore-ceiling reads a real
+            # number instead of falling back to the hard-coded constant at
+            # every call site. 16.0 matches that previous hard-coded
+            # constant exactly, so this is a no-behavior-change-on-upgrade
+            # default, same convention as the nibe backfill below.
+            if "ev_max_current_a" not in self.data["governor"]:
+                self.data["governor"]["ev_max_current_a"] = 16.0
+                changed = True
 
         # --- ev_scheduler section (added Fas 5b, 2026-08-31) ---
         if "ev_scheduler" not in self.data:
@@ -960,6 +1018,11 @@ class SettingsStore:
                 "heat_offset_reduction_c": -2,
                 "upgrade_cooldown_s": 1200.0,
                 "max_continuous_economy_s": 259200.0,
+                # effektvakt_* added 2026-10-05 — see this section's
+                # top-level default dict above for the full story. Off/
+                # inert on backfill, same no-behavior-change convention.
+                "effektvakt_governor_enabled": False,
+                "effektvakt_max_power_kw": 6.0,
             }
             for key, default_value in nibe_defaults.items():
                 if key not in nibe_section:

@@ -420,6 +420,22 @@ async def patch_settings(updates: dict):
                         status_code=422,
                         detail="governor.target_kw must be a positive number",
                     )
+                # Added 2026-10-05 — bounds match the charger hardware:
+                # 6A is number.gpn049831_min_laddstrom (and
+                # core.zaptec.controller.ZAPTEC_FLOOR_CURRENT), 20A is the
+                # ceiling Håkan asked for. Note this does NOT by itself
+                # confirm his circuit/breaker supports 20A/3-phase — his
+                # previously-confirmed real installation limit was 16A.
+                ev_max_current_a = snake_data.get("ev_max_current_a")
+                if ev_max_current_a is not None and (
+                    not isinstance(ev_max_current_a, (int, float))
+                    or isinstance(ev_max_current_a, bool)
+                    or not (6 <= ev_max_current_a <= 20)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="governor.ev_max_current_a must be between 6 and 20",
+                    )
 
             if store_key == "nibe":
                 percentile = snake_data.get("cheap_price_percentile")
@@ -522,6 +538,20 @@ async def patch_settings(updates: dict):
                     raise HTTPException(
                         status_code=422,
                         detail="nibe.max_continuous_economy_s must be greater than zero",
+                    )
+                # Added 2026-10-05 — bounds match number.max_int_add_power_47212's
+                # own HA-reported range (0-45kW) on Håkan's F750. See
+                # core/bess/settings_store.py's nibe.effektvakt_max_power_kw
+                # comment for why this setting doesn't do anything live yet.
+                effektvakt_max_power = snake_data.get("effektvakt_max_power_kw")
+                if effektvakt_max_power is not None and (
+                    not isinstance(effektvakt_max_power, (int, float))
+                    or isinstance(effektvakt_max_power, bool)
+                    or not (0 <= effektvakt_max_power <= 45)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.effektvakt_max_power_kw must be between 0 and 45",
                     )
 
             if store_key == "ev_scheduler":
