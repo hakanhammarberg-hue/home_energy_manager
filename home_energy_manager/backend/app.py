@@ -125,11 +125,13 @@ NIBE_DHW_COMFORT_MODE_ENTITY = "select.hot_water_comfort_mode_47041"
 # Added 2026-10-05 — the pump's own "effektvakt" (power-guard) registers.
 # Both were disabled_by="integration" (never enabled before); enabled + the
 # nibe_heatpump config entry reloaded 2026-10-05, same pattern as every
-# other register above. Both confirmed "unavailable" after that —
-# effektvakt has never been turned on at the pump's own panel (no fuse
-# size entered there). See core/nibe/controller.py's EFFEKTVAKT tier and
-# core/bess/settings_store.py's nibe.effektvakt_max_power_kw comment for
-# the full story and current status.
+# other register above. Confirmed "unavailable" that day (effektvakt never
+# turned on at the pump's own panel); confirmed turned ON since 2026-10-06
+# (3.0kW/20A). See core/nibe/controller.py's EFFEKTVAKT tier and
+# core/bess/settings_store.py's nibe.effektvakt_baseline_kw/
+# effektvakt_floor_kw comment for the full story. Now actually read/written
+# by _poll_peak_governor() below (added 2026-10-06) when
+# nibe.effektvakt_governor_enabled is on.
 NIBE_EFFEKTVAKT_MAX_POWER_ENTITY = "number.max_int_add_power_47212"
 NIBE_EFFEKTVAKT_FUSE_ENTITY = "number.fuse_47214"
 
@@ -382,6 +384,33 @@ class BESSController:
         # governor.enabled is True, same "no I/O, no tracking, until
         # explicitly turned on" rule as governor_last_decision.
         self.governor_recent_peak_kw: float | None = None
+
+        # Added 2026-10-06 — the Nibe effektvakt lever (second lever behind
+        # the EV one above, see core/governor/peak_governor.py's
+        # decide_nibe_effektvakt()). _nibe_over_budget_streak counts
+        # consecutive _poll_peak_governor ticks where the EV lever is
+        # already at/below its floor and the household is still over
+        # budget — same semantics as the original pyscript's
+        # _over_budget_streak. Reset to 0 whenever either condition stops
+        # holding, same "no tracking until relevant" rule as
+        # governor_recent_peak_kw above (it only ever moves away from 0
+        # while governor.enabled is True, since _poll_peak_governor's own
+        # early-disabled return happens before this is touched).
+        self._nibe_over_budget_streak: int = 0
+        # Last decision decide_nibe_effektvakt() made, same "holds a value
+        # for the API/dashboard, not for governor.enabled, but for its OWN
+        # nibe.effektvakt_governor_enabled flag" rule as
+        # nibe_heating_last_decision/nibe_dhw_last_decision above.
+        self.nibe_effektvakt_last_decision: (
+            peak_governor.NibeEffektvaktDecision | None
+        ) = None
+        # The live effektvakt_current_kw reading _poll_peak_governor already
+        # takes each tick, cached here so governor_api.py's /api/governor/status
+        # can show it without taking its own HA read — that endpoint's own
+        # docstring promises zero I/O, same reasoning as
+        # governor_last_decision/governor_recent_peak_kw already being
+        # cached rather than recomputed per-request.
+        self.nibe_effektvakt_last_current_kw: float | None = None
 
         # Enable test mode from environment variable OR persisted demo_mode setting.
         # Environment variable takes precedence (for dev/CI use).
@@ -882,26 +911,33 @@ class BESSController:
         return upcoming_prices_ore or None, all_known_prices_ore or None
 
     def _poll_peak_governor(self) -> None:
-        """Fas 3b: reactively cap household power draw by throttling or
-        pausing Zaptec's charging current. See
-        core/governor/peak_governor.py for the decision logic itself and
-        its safety scope (EV lever only — no Nibe lever, no watchdog timer;
-        that module's docstring explains why neither is needed yet).
+        """Fas 3b, extended 2026-10-06: reactively cap household power draw
+        by throttling/pausing Zaptec's charging current (the EV lever),
+        then — if that alone isn't enough for long enough — lowering the
+        Nibe effektvakt cap too (the second lever). See
+        core/governor/peak_governor.py for both decision functions and the
+        Nibe lever's own watchdog/safety-gap discussion.
 
-        This is the one place in Fas 3b (now called from _poll_ev_charging,
-        Fas 5b — see that method's docstring for why they share one tick
-        instead of two independent jobs) that can call ZaptecController's
-        write methods automatically. It's safe to do so unconditionally
-        here because those methods are already gated by the same
-        test_mode flag Demo Mode controls everywhere else (set_demo_mode
-        above) — this loop running is exactly the behavior Håkan approved
-        conditionally on that gate (2026-08-29/30), not a second, separate
+        This is the one place (called from _poll_ev_charging, Fas 5b — see
+        that method's docstring for why they share one tick instead of two
+        independent jobs) that can call ZaptecController's AND
+        NibeController's write methods automatically. It's safe to do so
+        unconditionally here because those methods are already gated by
+        the same test_mode flag Demo Mode controls everywhere else
+        (set_demo_mode above) — this loop running is exactly the behavior
+        Håkan approved conditionally on that gate (2026-08-29/30 for the EV
+        lever, 2026-10-06 for the Nibe lever), not a second, separate
         safety mechanism.
 
-        No-ops entirely (not even a read) when governor.enabled is False,
-        which is the shipped default — so installing this code changes
-        nothing about anyone's running system until they explicitly turn
-        it on in Settings.
+        The EV lever no-ops entirely (not even a read) when governor.enabled
+        is False, which is the shipped default. The Nibe lever has its OWN
+        separate gate, nibe.effektvakt_governor_enabled (also False by
+        default) — see decide_nibe_effektvakt() — but that gate is only
+        ever consulted while governor.enabled is also True, since the Nibe
+        lever's entire premise ("EV alone isn't coping") is undefined
+        without the EV lever's own decision this same tick. So: installing
+        this code changes nothing for anyone until BOTH flags are
+        explicitly turned on in Settings.
         """
         governor_settings = self.settings_store.get_section("governor")
         if not governor_settings.get("enabled", False):
@@ -915,6 +951,12 @@ class BESSController:
             # context once it's switched off, so it resets right alongside
             # governor_last_decision rather than lingering as stale context.
             self.governor_recent_peak_kw = None
+            # Added 2026-10-06: the Nibe lever's premise doesn't exist
+            # without the EV lever running, so its state resets right
+            # alongside the EV lever's own — same reasoning, same tick.
+            self._nibe_over_budget_streak = 0
+            self.nibe_effektvakt_last_decision = None
+            self.nibe_effektvakt_last_current_kw = None
             return
 
         target_kw = governor_settings.get("target_kw", peak_governor.DEFAULT_TARGET_KW)
@@ -960,6 +1002,64 @@ class BESSController:
             logger.info("peak_governor: %s", decision.reason)
         else:
             logger.debug("peak_governor: %s", decision.reason)
+
+        # --- Nibe effektvakt lever (added 2026-10-06) ---------------------
+        # Streak condition mirrors the original pyscript's
+        # _over_budget_streak exactly: still over budget AND the EV lever's
+        # own current reading (this tick's, pre-write — reflects whatever
+        # last cycle's write already settled it to) is already at/below its
+        # floor. Using ev_current_a (the read) rather than
+        # decision.ev_current_target_a deliberately: a pause
+        # (ev_current_target_a is None, pause_charging True) still counts
+        # as "at the floor" for this purpose — there's nothing lower EV can
+        # give either way.
+        ev_insufficient_this_cycle = (
+            current_kw is not None
+            and current_kw > target_kw
+            and ev_current_a is not None
+            and ev_current_a <= peak_governor.ZAPTEC_FLOOR_CURRENT
+        )
+        self._nibe_over_budget_streak = (
+            self._nibe_over_budget_streak + 1 if ev_insufficient_this_cycle else 0
+        )
+
+        nibe_settings = self.settings_store.get_section("nibe")
+        effektvakt_enabled = nibe_settings.get("effektvakt_governor_enabled", False)
+        effektvakt_floor_kw = nibe_settings.get(
+            "effektvakt_floor_kw", peak_governor.NIBE_EFFEKTVAKT_FLOOR_KW
+        )
+        effektvakt_baseline_kw = nibe_settings.get("effektvakt_baseline_kw")
+        # get_effektvakt_max_power_kw() also refreshes NibeController's
+        # shared last_contact_monotonic heartbeat (see that method's own
+        # 2026-10-06 docstring addition) — called unconditionally here,
+        # same "heartbeat reads happen every tick regardless of what this
+        # cycle does with the value" pattern _poll_nibe already uses for
+        # get_heat_offset().
+        effektvakt_current_kw = self.nibe_controller.get_effektvakt_max_power_kw()
+        self.nibe_effektvakt_last_current_kw = effektvakt_current_kw
+        seconds_since_last_nibe_contact = self.nibe_controller.seconds_since_last_contact()
+
+        nibe_decision = peak_governor.decide_nibe_effektvakt(
+            enabled=effektvakt_enabled,
+            over_budget_streak=self._nibe_over_budget_streak,
+            effektvakt_current_kw=effektvakt_current_kw,
+            effektvakt_baseline_kw=effektvakt_baseline_kw,
+            seconds_since_last_nibe_contact=seconds_since_last_nibe_contact,
+            floor_kw=effektvakt_floor_kw,
+        )
+
+        if nibe_decision.effektvakt_target_kw is not None:
+            self.nibe_controller.set_effektvakt_max_power_kw(
+                nibe_decision.effektvakt_target_kw
+            )
+
+        self.nibe_effektvakt_last_decision = nibe_decision
+        if nibe_decision.status == "watchdog_reset":
+            logger.warning("nibe_effektvakt: %s", nibe_decision.reason)
+        elif nibe_decision.status == "throttling_nibe":
+            logger.info("nibe_effektvakt: %s", nibe_decision.reason)
+        else:
+            logger.debug("nibe_effektvakt: %s", nibe_decision.reason)
 
     def _poll_nibe(self) -> None:
         """Fas 4a: the 30s tick for both Nibe comfort levers (curve-offset

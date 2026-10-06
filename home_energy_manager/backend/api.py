@@ -539,19 +539,52 @@ async def patch_settings(updates: dict):
                         status_code=422,
                         detail="nibe.max_continuous_economy_s must be greater than zero",
                     )
-                # Added 2026-10-05 — bounds match number.max_int_add_power_47212's
-                # own HA-reported range (0-45kW) on Håkan's F750. See
-                # core/bess/settings_store.py's nibe.effektvakt_max_power_kw
-                # comment for why this setting doesn't do anything live yet.
-                effektvakt_max_power = snake_data.get("effektvakt_max_power_kw")
-                if effektvakt_max_power is not None and (
-                    not isinstance(effektvakt_max_power, (int, float))
-                    or isinstance(effektvakt_max_power, bool)
-                    or not (0 <= effektvakt_max_power <= 45)
+                # Added 2026-10-05, revised 2026-10-06 — bounds match
+                # number.max_int_add_power_47212's own HA-reported range
+                # (0-45kW) on Håkan's F750. See
+                # core/bess/settings_store.py's nibe.effektvakt_baseline_kw/
+                # effektvakt_floor_kw comment for the full story — both are
+                # now real, Håkan-confirmed values (3.0/1.0), not guesses,
+                # and decide_nibe_effektvakt() (core/governor/peak_governor.py)
+                # does read them live as of this change.
+                effektvakt_baseline = snake_data.get("effektvakt_baseline_kw")
+                if effektvakt_baseline is not None and (
+                    not isinstance(effektvakt_baseline, (int, float))
+                    or isinstance(effektvakt_baseline, bool)
+                    or not (0 <= effektvakt_baseline <= 45)
                 ):
                     raise HTTPException(
                         status_code=422,
-                        detail="nibe.effektvakt_max_power_kw must be between 0 and 45",
+                        detail="nibe.effektvakt_baseline_kw must be between 0 and 45",
+                    )
+                effektvakt_floor = snake_data.get("effektvakt_floor_kw")
+                if effektvakt_floor is not None and (
+                    not isinstance(effektvakt_floor, (int, float))
+                    or isinstance(effektvakt_floor, bool)
+                    or not (0 <= effektvakt_floor <= 45)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.effektvakt_floor_kw must be between 0 and 45",
+                    )
+                # Both bounds individually valid doesn't mean the pair is
+                # sensible — a floor at/above the baseline would make the
+                # lever a no-op (nothing to lower toward) or, worse, let
+                # "restoring" push past what the floor allows. Only checked
+                # when both are present in the same request so a partial
+                # PATCH (e.g. just flipping the enabled toggle) never trips
+                # this on a combination it didn't touch.
+                if (
+                    effektvakt_baseline is not None
+                    and effektvakt_floor is not None
+                    and effektvakt_floor >= effektvakt_baseline
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "nibe.effektvakt_floor_kw must be less than "
+                            "nibe.effektvakt_baseline_kw"
+                        ),
                     )
 
             if store_key == "ev_scheduler":

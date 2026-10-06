@@ -122,14 +122,20 @@ const SettingsPage: React.FC = () => {
   const [savedNibeCheapPricePercentile, setSavedNibeCheapPricePercentile] = useState(0.5);
   const [nibeMinSolarSurplusKw, setNibeMinSolarSurplusKw] = useState(0.0);
   const [savedNibeMinSolarSurplusKw, setSavedNibeMinSolarSurplusKw] = useState(0.0);
-  // Added 2026-10-05 — effektvakt (power-guard) max-power lever scaffolding.
-  // effektvaktGovernorEnabled has no automatic effect yet (nothing in the
-  // polling loop reads it) — see core/bess/settings_store.py's
-  // nibe.effektvakt_max_power_kw comment for the full story and why.
+  // Added 2026-10-05, revised 2026-10-06 — effektvakt (power-guard) lever.
+  // effektvaktGovernorEnabled is the master on/off switch, still False by
+  // default. effektvaktBaselineKw/effektvaktFloorKw replace the old single
+  // effektvaktMaxPowerKw guess (6.0) with two real, Håkan-confirmed values:
+  // 3.0kW is what he's manually dialled in at the pump's own panel, 1.0kW
+  // is the floor he approved in chat ("som lägst 1 kw låter bra") — see
+  // core/governor/peak_governor.py's decide_nibe_effektvakt() for how both
+  // are actually used now that this toggle does something.
   const [effektvaktGovernorEnabled, setEffektvaktGovernorEnabled] = useState(false);
   const [savedEffektvaktGovernorEnabled, setSavedEffektvaktGovernorEnabled] = useState(false);
-  const [effektvaktMaxPowerKw, setEffektvaktMaxPowerKw] = useState(6.0);
-  const [savedEffektvaktMaxPowerKw, setSavedEffektvaktMaxPowerKw] = useState(6.0);
+  const [effektvaktBaselineKw, setEffektvaktBaselineKw] = useState(3.0);
+  const [savedEffektvaktBaselineKw, setSavedEffektvaktBaselineKw] = useState(3.0);
+  const [effektvaktFloorKw, setEffektvaktFloorKw] = useState(1.0);
+  const [savedEffektvaktFloorKw, setSavedEffektvaktFloorKw] = useState(1.0);
 
   // ── saved snapshots (for dirty detection) ──────────────────────────────
   const savedBattery = useRef<string>('');
@@ -177,7 +183,8 @@ const SettingsPage: React.FC = () => {
       nibeCheapPricePercentile !== savedNibeCheapPricePercentile ||
       nibeMinSolarSurplusKw !== savedNibeMinSolarSurplusKw ||
       effektvaktGovernorEnabled !== savedEffektvaktGovernorEnabled ||
-      effektvaktMaxPowerKw !== savedEffektvaktMaxPowerKw,
+      effektvaktBaselineKw !== savedEffektvaktBaselineKw ||
+      effektvaktFloorKw !== savedEffektvaktFloorKw,
   };
 
   // ── loading / saving / error state ────────────────────────────────────
@@ -340,8 +347,10 @@ const SettingsPage: React.FC = () => {
       setSavedNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
       setEffektvaktGovernorEnabled(nibe.effektvaktGovernorEnabled ?? false);
       setSavedEffektvaktGovernorEnabled(nibe.effektvaktGovernorEnabled ?? false);
-      setEffektvaktMaxPowerKw(nibe.effektvaktMaxPowerKw ?? 6.0);
-      setSavedEffektvaktMaxPowerKw(nibe.effektvaktMaxPowerKw ?? 6.0);
+      setEffektvaktBaselineKw(nibe.effektvaktBaselineKw ?? 3.0);
+      setSavedEffektvaktBaselineKw(nibe.effektvaktBaselineKw ?? 3.0);
+      setEffektvaktFloorKw(nibe.effektvaktFloorKw ?? 1.0);
+      setSavedEffektvaktFloorKw(nibe.effektvaktFloorKw ?? 1.0);
 
       if (healthRes.data?.checks) {
         const map: Record<string, HealthStatus> = {};
@@ -656,7 +665,8 @@ const SettingsPage: React.FC = () => {
           cheapPricePercentile: nibeCheapPricePercentile,
           minSolarSurplusKw: nibeMinSolarSurplusKw,
           effektvaktGovernorEnabled: effektvaktGovernorEnabled,
-          effektvaktMaxPowerKw: effektvaktMaxPowerKw,
+          effektvaktBaselineKw: effektvaktBaselineKw,
+          effektvaktFloorKw: effektvaktFloorKw,
         },
       });
       setSavedDemoEnabled(demoEnabled);
@@ -673,7 +683,8 @@ const SettingsPage: React.FC = () => {
       setSavedNibeCheapPricePercentile(nibeCheapPricePercentile);
       setSavedNibeMinSolarSurplusKw(nibeMinSolarSurplusKw);
       setSavedEffektvaktGovernorEnabled(effektvaktGovernorEnabled);
-      setSavedEffektvaktMaxPowerKw(effektvaktMaxPowerKw);
+      setSavedEffektvaktBaselineKw(effektvaktBaselineKw);
+      setSavedEffektvaktFloorKw(effektvaktFloorKw);
       window.dispatchEvent(new Event('bess:demo-mode-changed'));
       setToast({ type: 'success', message: 'System settings saved.' });
     } catch (err) {
@@ -979,17 +990,25 @@ const SettingsPage: React.FC = () => {
                   setEffektvaktGovernorEnabled,
                 )}
                 {numField(
-                  'Effektvakt, max eltillsats',
-                  effektvaktMaxPowerKw,
-                  setEffektvaktMaxPowerKw,
+                  'Effektvakt, bas (manuellt satt på pumpen)',
+                  effektvaktBaselineKw,
+                  setEffektvaktBaselineKw,
+                  { min: 0, max: 45, step: 0.5, unit: 'kW' },
+                )}
+                {numField(
+                  'Effektvakt, golv (lägsta vid balansering)',
+                  effektvaktFloorKw,
+                  setEffektvaktFloorKw,
                   { min: 0, max: 45, step: 0.5, unit: 'kW' },
                 )}
                 <p className="text-xs text-gray-500 dark:text-gray-400">
-                  Effektvakt-styrning gör ännu ingenting automatiskt — bara inställningen finns,
-                  ingen kod läser den än (byggs som nästa steg om du vill). Och oavsett det: båda
-                  effektvakt-registren svarar "unavailable" på din F750 just nu, eftersom
-                  effektvakt aldrig slagits på på pumpens egen panel (ingen huvudsäkring angiven
-                  där) — se Nibe drift-sidan för live-avläsningen.
+                  Aktiv styrning (2026-10-06): när Zaptec-spaken ensam inte räcker för att hålla
+                  hushållet under effektvaktens mål i 3 på varandra följande 30s-cykler (90s) sänks
+                  pumpens eltillsatstak stegvis mot golvet ovan, och återställs mot basen igen så
+                  snart Zaptec-spaken klarar sig själv. "Bas" måste matcha vad som faktiskt är
+                  inställt på pumpens egen panel (Max int. add. power) — om du ändrar det där,
+                  uppdatera detta fält till samma värde. Se Nibe drift-sidan för live-avläsningen
+                  och aktuell status.
                 </p>
               </SectionCard>
 

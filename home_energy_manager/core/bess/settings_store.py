@@ -667,37 +667,43 @@ class SettingsStore:
                 "heat_offset_reduction_c": -2,
                 "upgrade_cooldown_s": 1200.0,
                 "max_continuous_economy_s": 259200.0,
-                # Added 2026-10-05 — Håkan asked for a Nibe "max allowed
-                # power" setting, modelled on the pump's own "effektvakt"
-                # (power-guard) function. Investigated live against his
-                # F750: effektvakt is driven by two Modbus registers,
-                # number.fuse_47214 (main fuse rating, 1-400A) and
-                # number.max_int_add_power_47212 (cap on the internal
+                # Added 2026-10-05, revised 2026-10-06 — Håkan asked for a
+                # Nibe "max allowed power" setting, modelled on the pump's
+                # own "effektvakt" (power-guard) function. Investigated
+                # live against his F750: effektvakt is driven by two Modbus
+                # registers, number.fuse_47214 (main fuse rating, 1-400A)
+                # and number.max_int_add_power_47212 (cap on the internal
                 # electric backup heater, 0-45kW, continuous — NOT a fixed
                 # 2-3-step selector, despite that being a common F-series
                 # wiring pattern). Both were disabled_by="integration" in
                 # HA's registry (never enabled before); enabled + the
                 # nibe_heatpump config entry reloaded 2026-10-05, same
                 # pattern as every other register in this file's history.
-                # Confirmed CURRENT STATE: both still read "unavailable"
-                # after that — effektvakt itself has never been turned on
-                # at the pump's own control panel (no fuse size entered),
-                # so there is nothing running to cap yet. This setting and
-                # effektvakt_governor_enabled below are the scaffolding
-                # (validated, ready to use) for the day it is turned on;
-                # see core/nibe/controller.py's EFFEKTVAKT tier and
-                # core/nibe/live.py's fuseRatingA/effektvaktMaxPowerKw for
-                # the read side. No automatic write path is wired into the
-                # governor polling loop yet — that is a deliberate,
-                # separate next step (same "capability now, decision logic
-                # later" split as every other lever in this file), not
-                # built in this pass. 6.0 is an explicitly unconfirmed
-                # guess (same honest flagging as degree_minutes_floor
-                # above) — a typical single-step size for an F-series
-                # internal electric addition, not a measured value for
-                # Håkan's own installation.
+                #
+                # 2026-10-05: both still read "unavailable" — effektvakt
+                # had never been turned on at the pump's own panel.
+                # 2026-10-06: confirmed NOW turned on (3.0kW/20A), and
+                # Håkan confirmed in chat that 3.0kW is a real value he set
+                # manually at the pump's own panel, not a guess. This
+                # replaces the old, explicitly-flagged-as-a-guess
+                # effektvakt_max_power_kw (6.0) with two real, Håkan-
+                # confirmed values instead:
+                #   - effektvakt_baseline_kw: what's dialled in on the
+                #     pump's panel right now. decide_nibe_effektvakt()
+                #     (core/governor/peak_governor.py) restores UP to this
+                #     value, never above it — it is read from settings, not
+                #     the live register, so a later manual panel change
+                #     needs this setting updated to match (same contract as
+                #     governor.ev_max_current_a vs. Zaptec's real ceiling).
+                #   - effektvakt_floor_kw: how low HEM is allowed to push
+                #     the cap when the EV lever alone isn't enough. 1.0,
+                #     Håkan's own words: "som lägst 1 kw låter bra."
+                # effektvakt_governor_enabled below is still the master
+                # on/off switch for the whole lever, still defaulting to
+                # False — this upgrade does not turn anything on by itself.
                 "effektvakt_governor_enabled": False,
-                "effektvakt_max_power_kw": 6.0,
+                "effektvakt_baseline_kw": 3.0,
+                "effektvakt_floor_kw": 1.0,
             },
         }
 
@@ -1018,16 +1024,30 @@ class SettingsStore:
                 "heat_offset_reduction_c": -2,
                 "upgrade_cooldown_s": 1200.0,
                 "max_continuous_economy_s": 259200.0,
-                # effektvakt_* added 2026-10-05 — see this section's
-                # top-level default dict above for the full story. Off/
-                # inert on backfill, same no-behavior-change convention.
+                # effektvakt_* added 2026-10-05, revised 2026-10-06 — see
+                # this section's top-level default dict above for the full
+                # story. Off/inert on backfill, same no-behavior-change
+                # convention — effektvakt_governor_enabled stays False.
                 "effektvakt_governor_enabled": False,
-                "effektvakt_max_power_kw": 6.0,
+                "effektvakt_baseline_kw": 3.0,
+                "effektvakt_floor_kw": 1.0,
             }
             for key, default_value in nibe_defaults.items():
                 if key not in nibe_section:
                     nibe_section[key] = default_value
                     changed = True
+            # 2026-10-06: effektvakt_max_power_kw (shipped 2026-10-05, one
+            # day earlier) was an explicitly-flagged GUESS (6.0) for a
+            # setting nothing read yet. Superseded by effektvakt_baseline_kw/
+            # effektvakt_floor_kw above, which are real Håkan-confirmed
+            # values, not a guess — so this old key is dropped rather than
+            # migrated forward; carrying its guessed value into the new
+            # baseline would be wrong now that the real one is known.
+            # pop(..., None) makes this safe to run again on an install
+            # that never had the old key (e.g. a brand new install created
+            # straight from the top-level default dict above).
+            if nibe_section.pop("effektvakt_max_power_kw", None) is not None:
+                changed = True
 
         # --- ai_analyst: rewrite deprecated Claude 4.0 launch model IDs ---
         # claude-{sonnet,opus}-4-20250514 return 404 ahead of their 2026-06-15

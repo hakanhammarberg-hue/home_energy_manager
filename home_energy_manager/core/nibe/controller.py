@@ -221,19 +221,29 @@ class NibeController:
         """EFFEKTVAKT tier read. Current number.max_int_add_power_47212
         value (the pump's own cap on its internal electric backup heater),
         or None if effektvakt_max_power_entity wasn't configured, or if the
-        register is unavailable. Confirmed live 2026-10-05: unavailable on
-        Håkan's F750 — effektvakt has never been turned on at the pump's
-        own control panel (no fuse size entered there), so there is
-        currently nothing for this to read."""
+        register is unavailable. Was unavailable on Håkan's F750 as of
+        2026-10-05 (effektvakt never turned on at the pump's own panel);
+        confirmed turned on since (3.0kW/20A as of 2026-10-06).
+
+        Added 2026-10-06: a successful read here ALSO updates
+        last_contact_monotonic, same heartbeat get_heat_offset() already
+        maintains — broadened from "set by get_heat_offset(), never by
+        anything else" (this method's own original docstring) now that
+        core/governor/peak_governor.py's decide_nibe_effektvakt() needs its
+        own watchdog and talking to either register is equally good
+        evidence the pump/HA link is alive. One shared clock for both
+        levers' watchdogs, not two independently-drifting ones."""
         if self.effektvakt_max_power_entity is None:
             return None
         raw = self._get_raw_state(self.effektvakt_max_power_entity)
         if raw is None:
             return None
         try:
-            return float(raw)
+            value = float(raw)
         except ValueError:
             return None
+        self.last_contact_monotonic = time.monotonic()
+        return value
 
     def get_effektvakt_fuse_rating_a(self) -> float | None:
         """Read-only diagnostic. Current number.fuse_47214 value (the main
