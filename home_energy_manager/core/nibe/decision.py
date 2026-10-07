@@ -361,6 +361,13 @@ DEFAULT_CHEAP_PRICE_PERCENTILE = 0.5  # cheaper half of today's known hours — 
 DEFAULT_MIN_SOLAR_SURPLUS_KW = 0.0
 DEFAULT_HEADROOM_MARGIN_KW = 0.0  # v1 scope: any positive headroom counts, no safety buffer beyond target_kw itself
 
+# Local copy of controller.py's own DHW_COMFORT_MODE_LUXURY string. Not
+# imported from there on purpose — this module stays dependency-free (no
+# HA/requests import), same reasoning as every other module docstring here.
+# Only used to recognize the one raw register value decide_dhw_luxury()
+# needs to react to while disabled (see its own docstring, 2026-10-07 fix).
+_RAW_COMFORT_MODE_LUXURY = "LUXURY"
+
 # Fas 4b (2026-09-24) — the watchdog controller.py's own docstring calls a
 # "hard requirement before this runs beyond demo mode". 15 minutes: long
 # enough that a normal transient (HA restart, brief network hiccup) never
@@ -465,16 +472,23 @@ class HeatingBoostDecision:
 class DhwLuxuryDecision:
     """Whether DHW should be in Luxury or Economy comfort mode this cycle.
 
-    status: "disabled" | "no_headroom" | "luxury_cheap_price" |
-        "luxury_solar_surplus" | "economy_no_condition" |
-        "forced_normal_legionella_guard"
-    comfort_mode: "luxury" | "economy" | "normal" | None (None only when
-        disabled — the caller must leave the register untouched entirely,
-        the same "off = don't even read" contract governor/ev_scheduler use
-        for their own enabled flags). "normal" only ever appears for
-        "forced_normal_legionella_guard" — see module docstring's SEVENTH
-        section; this module never chooses Normal for cost/comfort reasons,
-        only as that safety override.
+    status: "disabled" | "disabled_reset_from_luxury" | "no_headroom" |
+        "luxury_cheap_price" | "luxury_solar_surplus" | "economy_no_condition"
+        | "forced_normal_legionella_guard"
+    comfort_mode: "luxury" | "economy" | "normal" | None (None when disabled
+        AND the register isn't currently stuck on Luxury — the caller must
+        leave it untouched entirely in that case, the same "off = don't even
+        read" contract governor/ev_scheduler use for their own enabled
+        flags). "normal" appears for "forced_normal_legionella_guard" (see
+        module docstring's SEVENTH section) and for
+        "disabled_reset_from_luxury" (bug found 2026-10-07: turning the
+        dashboard toggle off used to leave the register exactly where it
+        last was, so if this lever had pushed Luxury before being switched
+        off, the pump stayed in Luxury — and therefore at its warmer
+        target-temperature band — indefinitely, with nothing to ever pull
+        it back down). This module never chooses Normal for cost/comfort
+        reasons on its own — only as one of these two safety/correctness
+        overrides.
     """
 
     status: str
@@ -791,12 +805,29 @@ def decide_dhw_luxury(
     headroom_margin_kw: float = DEFAULT_HEADROOM_MARGIN_KW,
     seconds_since_last_non_economy: float | None = None,
     max_continuous_economy_s: float = DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
+    current_comfort_mode: str | None = None,
 ) -> DhwLuxuryDecision:
     """Pure decision for the "Lyxläge varmvatten" dashboard toggle.
 
     `enabled` is the dashboard switch itself (nibe.dhw_luxury_enabled in
-    settings_store) — when off, this is a deliberate no-op: comfort_mode
-    is None and the caller must not touch the register at all.
+    settings_store) — when off, this is normally a deliberate no-op:
+    comfort_mode is None and the caller must not touch the register at all,
+    so a manual choice made on the pump's own panel (Economy, Normal, Smart
+    Control) is never fought.
+
+    `current_comfort_mode`: the register's raw, currently-read value (e.g.
+    "LUXURY"/"ECONOMY"/"NORMAL"/"SMART CONTROL", case-insensitive), or None
+    if unavailable. Only consulted while `enabled` is False, and only to
+    catch exactly one failure mode found 2026-10-07: this lever had
+    previously pushed Luxury, then the dashboard toggle was switched off the
+    same day — but "off" only ever meant "stop asking for Luxury", never
+    "undo what I already asked for", so the pump stayed stuck in Luxury (and
+    its warmer 58-64°C target band) for two days with nothing to pull it
+    back down. If the register is found sitting on Luxury while disabled,
+    this now resets it to Normal once; any other value (including a
+    deliberate manual Luxury choice made without this toggle) is still left
+    completely untouched, matching the original "don't fight the panel"
+    intent.
 
     seconds_since_last_non_economy, max_continuous_economy_s: legionella/
         disinfection guard (see module docstring's SEVENTH section) —
@@ -808,6 +839,15 @@ def decide_dhw_luxury(
         time; this function does no date/time math itself.
     """
     if not enabled:
+        if (current_comfort_mode or "").strip().upper() == _RAW_COMFORT_MODE_LUXURY:
+            return DhwLuxuryDecision(
+                status="disabled_reset_from_luxury",
+                comfort_mode="normal",
+                reason=(
+                    "Lyxläge varmvatten is off, but the pump is still stuck on "
+                    "Luxury from before it was switched off — resetting to Normal"
+                ),
+            )
         return DhwLuxuryDecision(
             status="disabled", comfort_mode=None, reason="Lyxläge varmvatten is off"
         )

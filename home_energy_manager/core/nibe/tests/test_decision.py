@@ -715,6 +715,75 @@ def test_dhw_luxury_disabled_is_a_pure_noop():
     assert d.comfort_mode is None
 
 
+def test_dhw_luxury_disabled_is_still_a_noop_when_current_mode_is_economy():
+    # Disabled + a manual Economy/Normal/Smart Control choice on the pump's
+    # own panel must stay completely untouched — only a stray Luxury should
+    # ever trigger the 2026-10-07 reset below.
+    d = decide_dhw_luxury(
+        enabled=False,
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=5.0,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        current_comfort_mode="ECONOMY",
+    )
+    assert d.status == "disabled"
+    assert d.comfort_mode is None
+
+
+def test_dhw_luxury_disabled_resets_a_stuck_luxury_register_to_normal():
+    # Bug found 2026-10-07: the toggle had been on, pushed Luxury, then was
+    # switched off the same day — but nothing ever pulled the register back
+    # down, so it stayed stuck on Luxury (58-64°C target band) for two days.
+    d = decide_dhw_luxury(
+        enabled=False,
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=5.0,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        current_comfort_mode="LUXURY",
+    )
+    assert d.status == "disabled_reset_from_luxury"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_luxury_disabled_reset_check_is_case_insensitive():
+    d = decide_dhw_luxury(
+        enabled=False,
+        spot_price_ore_per_kwh=None,
+        today_prices_ore_per_kwh=None,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        current_comfort_mode="luxury",
+    )
+    assert d.status == "disabled_reset_from_luxury"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_luxury_disabled_is_a_noop_when_current_mode_unknown():
+    # Unavailable/None must fail closed to "don't touch", not to "reset" —
+    # resetting without proof the register is actually stuck on Luxury
+    # would itself be an unwanted write.
+    d = decide_dhw_luxury(
+        enabled=False,
+        spot_price_ore_per_kwh=None,
+        today_prices_ore_per_kwh=None,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        current_comfort_mode=None,
+    )
+    assert d.status == "disabled"
+    assert d.comfort_mode is None
+
+
 def test_dhw_luxury_on_cheap_price():
     d = decide_dhw_luxury(
         enabled=True,

@@ -28,6 +28,7 @@ export type HeatingStatus =
 
 export type DhwStatus =
   | 'disabled'
+  | 'disabled_reset_from_luxury'
   | 'no_headroom'
   | 'luxury_cheap_price'
   | 'luxury_solar_surplus'
@@ -64,6 +65,7 @@ export const HEATING_STATUS_COLORS: Record<HeatingStatus, StatusColor> = {
 
 export const DHW_STATUS_LABELS: Record<DhwStatus, string> = {
   disabled: 'Av',
+  disabled_reset_from_luxury: 'Av — återställde Lyxläge som fastnat till Normal',
   no_headroom: 'Ekonomi — effektvakten saknar utrymme',
   luxury_cheap_price: 'Lyxläge — billig timme',
   luxury_solar_surplus: 'Lyxläge — solöverskott',
@@ -73,6 +75,7 @@ export const DHW_STATUS_LABELS: Record<DhwStatus, string> = {
 
 export const DHW_STATUS_COLORS: Record<DhwStatus, StatusColor> = {
   disabled: 'blue',
+  disabled_reset_from_luxury: 'yellow',
   no_headroom: 'yellow',
   luxury_cheap_price: 'green',
   luxury_solar_surplus: 'green',

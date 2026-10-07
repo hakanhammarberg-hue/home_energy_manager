@@ -1252,6 +1252,12 @@ class BESSController:
                 "max_continuous_economy_s",
                 nibe_decision.DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
             ),
+            # Bug found 2026-10-07: without this, switching the dashboard
+            # toggle off never undid a Luxury command this lever had
+            # already sent — the pump stayed stuck in Luxury indefinitely.
+            # A cheap extra GET (read-tier, always allowed) so
+            # decide_dhw_luxury can detect and self-heal exactly that case.
+            current_comfort_mode=self.nibe_controller.get_dhw_comfort_mode(),
         )
         self.nibe_dhw_last_decision = dhw_decision
         if dhw_decision.comfort_mode is None:
@@ -1278,16 +1284,19 @@ class BESSController:
         elif dhw_decision.comfort_mode == "normal":
             # Legionella guard (Fas 4e) — see nibe_decision's SEVENTH section.
             self.nibe_controller.set_dhw_comfort_mode(DHW_COMFORT_MODE_NORMAL)
-        # comfort_mode is None only when dhw_luxury_enabled is False —
-        # deliberately don't touch the register in that case (see
-        # decide_dhw_luxury's own docstring).
+        # comfort_mode is None only when dhw_luxury_enabled is False AND the
+        # register isn't stuck on Luxury — deliberately don't touch it in
+        # that case (see decide_dhw_luxury's own docstring).
 
         if heating_decision.status in ("no_data", "watchdog_reset"):
             logger.warning("nibe heating: %s", heating_decision.reason)
         else:
             logger.debug("nibe heating: %s", heating_decision.reason)
-        if dhw_decision.status == "forced_normal_legionella_guard":
-            logger.info("nibe dhw: %s", dhw_decision.reason)
+        if dhw_decision.status in (
+            "forced_normal_legionella_guard",
+            "disabled_reset_from_luxury",
+        ):
+            logger.warning("nibe dhw: %s", dhw_decision.reason)
         else:
             logger.debug("nibe dhw: %s", dhw_decision.reason)
 
