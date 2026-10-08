@@ -1368,7 +1368,28 @@ async def get_inverter_status():
 
         battery_soc = controller.get_battery_soc()
         if battery_soc is None:
-            raise ValueError("battery_soc sensor is unavailable")
+            # Same gap as /api/dashboard had until 2026-10-08 (see that
+            # endpoint's own comment above): a temporary Growatt Modbus/WiFi
+            # comms outage makes battery_soc unavailable and this endpoint
+            # used to crash with a raw 500 on every poll until it cleared.
+            # Reuse the same already-polled rolling-window fallback instead
+            # of failing the whole inverter-status card.
+            if bess_controller.battery_soc_samples:
+                stale_ts, stale_soc = bess_controller.battery_soc_samples[-1]
+                age_s = time.time() - stale_ts
+                logger.warning(
+                    "battery_soc sensor unavailable — using last known "
+                    "value %.1f%% from %.0fs ago instead of failing "
+                    "/api/inverter/status",
+                    stale_soc,
+                    age_s,
+                )
+                battery_soc = stale_soc
+            else:
+                raise ValueError(
+                    "battery_soc sensor is unavailable and no cached "
+                    "reading exists yet"
+                )
         battery_soe = (battery_soc / 100.0) * battery_settings.total_capacity
         grid_charge_enabled = controller.grid_charge_enabled()
         charge_power_rate = controller.get_charging_power_rate()
