@@ -5,6 +5,7 @@ API endpoints for battery and electricity settings, dashboard data, and decision
 
 import dataclasses
 import threading
+import time
 from datetime import date as date_cls
 from datetime import datetime, timedelta
 from typing import Any
@@ -1239,6 +1240,37 @@ async def get_dashboard_data(
                 strategic_summary[intent] = strategic_summary.get(intent, 0) + 1
         else:
             battery_soc = controller.get_battery_soc()
+            if battery_soc is None:
+                # Found 2026-10-08: a genuine 32-minute Growatt Modbus/WiFi
+                # comms outage (same chronic issue documented in the
+                # project's own notes) made this endpoint crash with a raw
+                # 500 on every single poll for half an hour — there was no
+                # graceful handling here at all, the same gap BESS Manager's
+                # fork of this endpoint has always had (see that app's own
+                # 2026-10-03 incident). Degrade instead of failing the whole
+                # dashboard: fall back to the most recent sample from the
+                # battery_soc_samples rolling window, which is already
+                # polled independently every 30s for the SOC-range stat
+                # (_poll_battery_soc_range in app.py) — no new I/O needed.
+                if bess_controller.battery_soc_samples:
+                    stale_ts, stale_soc = bess_controller.battery_soc_samples[-1]
+                    age_s = time.time() - stale_ts
+                    logger.warning(
+                        "battery_soc sensor unavailable — using last known "
+                        "value %.1f%% from %.0fs ago instead of failing the "
+                        "dashboard",
+                        stale_soc,
+                        age_s,
+                    )
+                    battery_soc = stale_soc
+                else:
+                    # No sample has ever been taken (e.g. moments after
+                    # startup, before the first 30s poll tick) — genuinely
+                    # nothing to fall back to, so this one case still raises.
+                    raise ValueError(
+                        "battery_soc sensor is unavailable and no cached "
+                        "reading exists yet"
+                    )
 
             # Strategic intent summary from actual schedule data
             try:
