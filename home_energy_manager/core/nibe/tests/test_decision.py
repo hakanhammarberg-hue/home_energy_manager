@@ -9,6 +9,7 @@ from core.nibe.decision import (
     DEFAULT_HEAT_OFFSET_BOOST_C,
     DEFAULT_HEAT_OFFSET_REDUCTION_C,
     DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
+    DEFAULT_MAX_INDOOR_TEMP_C,
     DEFAULT_PRICE_SPIKE_MIN_DELTA_ORE,
     DEFAULT_PRICE_SPIKE_PERCENTILE,
     DEFAULT_UPGRADE_COOLDOWN_S,
@@ -378,6 +379,152 @@ def test_degree_minutes_floor_checked_before_solar_and_price_but_after_headroom(
         degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR - 100,  # also past the floor
     )
     assert d.status == "no_headroom"
+    assert d.heat_offset_c == 0
+
+
+# ---------------------------------------------------------------------------
+# decide_heating_boost — Fas 4f indoor-temperature ceiling
+# ---------------------------------------------------------------------------
+
+
+def test_indoor_temp_ceiling_blocks_an_otherwise_engaged_cheap_price_boost():
+    """The ceiling is a gate, not an exception — same contract as the
+    degree-minutes floor, mirrored test-for-test."""
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        indoor_temp_c=DEFAULT_MAX_INDOOR_TEMP_C + 0.1,  # past the ceiling
+    )
+    assert d.status == "blocked_high_indoor_temp"
+    assert d.heat_offset_c == 0
+
+
+def test_indoor_temp_ceiling_blocks_solar_surplus_boost_too():
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=100.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=5.0,  # would otherwise engage
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        indoor_temp_c=30.0,
+    )
+    assert d.status == "blocked_high_indoor_temp"
+    assert d.heat_offset_c == 0
+
+
+def test_indoor_temp_at_exactly_the_ceiling_is_blocked():
+    """>= ceiling blocks, matching the degree-minutes floor's own <=
+    convention for 'at the boundary counts as triggered'."""
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        indoor_temp_c=DEFAULT_MAX_INDOOR_TEMP_C,
+    )
+    assert d.status == "blocked_high_indoor_temp"
+
+
+def test_indoor_temp_below_the_ceiling_does_not_block():
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        indoor_temp_c=DEFAULT_MAX_INDOOR_TEMP_C - 0.1,
+    )
+    assert d.status == "engaged_cheap_price"
+    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
+
+
+def test_indoor_temp_missing_does_not_block():
+    """None is not evidence the house is too warm — same burden-of-proof
+    convention as every other input in this module."""
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        indoor_temp_c=None,
+    )
+    assert d.status == "engaged_cheap_price"
+    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_BOOST_C
+
+
+def test_indoor_temp_ceiling_does_not_block_price_reduction():
+    """A negative offset only reduces compressor demand — the ceiling has
+    no reason to prevent that, mirroring the degree-minutes floor's own
+    test_price_reduction_is_not_blocked_by_the_degree_minutes_floor."""
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=EXPENSIVE_THRESHOLD,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        indoor_temp_c=30.0,
+        price_reduction_enabled=True,
+    )
+    assert d.status == "reduced_expensive_price"
+    assert d.heat_offset_c == DEFAULT_HEAT_OFFSET_REDUCTION_C
+
+
+def test_indoor_temp_ceiling_checked_before_solar_and_price_but_after_headroom():
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=True,
+        current_kw=12.0,
+        target_kw=12.0,  # zero headroom
+        indoor_temp_c=30.0,  # also past the ceiling
+    )
+    assert d.status == "no_headroom"
+    assert d.heat_offset_c == 0
+
+
+def test_indoor_temp_ceiling_and_degree_minutes_floor_both_active_reports_indoor_temp():
+    """When both gates would block, the indoor-temperature reason wins —
+    see the module docstring's EIGHTH LEVER section."""
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        degree_minutes=DEFAULT_DEGREE_MINUTES_FLOOR - 1,
+        indoor_temp_c=30.0,
+    )
+    assert d.status == "blocked_high_indoor_temp"
+    assert d.heat_offset_c == 0
+
+
+def test_anti_flap_never_suppresses_the_indoor_temp_ceiling():
+    d = decide_heating_boost(
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        indoor_temp_c=30.0,
+        previous_heat_offset_c=DEFAULT_HEAT_OFFSET_BOOST_C,
+        seconds_since_offset_last_changed=1.0,  # well within cooldown
+        upgrade_cooldown_s=DEFAULT_UPGRADE_COOLDOWN_S,
+    )
+    assert d.status == "blocked_high_indoor_temp"
     assert d.heat_offset_c == 0
 
 

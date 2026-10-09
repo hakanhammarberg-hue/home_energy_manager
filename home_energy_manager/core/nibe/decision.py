@@ -10,9 +10,11 @@ competitive scan (see claude/omvarldsbevakning-nibe-github-2026-09-26.md),
 picked by Håkan as items 1-3 of that report's recommendation list: active
 price-peak reduction (FIFTH LEVER), upgrade hysteresis/anti-flap (SIXTH
 section), and a legionella/disinfection guard on DHW Economy (SEVENTH
-section) — see each section below. Mirrors core.zaptec.scheduler's shape
-exactly: pure functions, no HA, no NibeController calls, testable without
-a live pump.
+section) — see each section below. Fas 4f (2026-10-09) added an indoor-
+temperature ceiling (EIGHTH LEVER below), after a two-day operations
+review found the boost lever had been engaged almost continuously and had
+overheated the house. Mirrors core.zaptec.scheduler's shape exactly: pure
+functions, no HA, no NibeController calls, testable without a live pump.
 
 MECHANISM CHOICE — REVISED 2026-09-22 (second pivot; read this before the
 old SG Ready references elsewhere in this package's history)
@@ -353,6 +355,57 @@ WHY BOTH LEVERS CHECK GOVERNOR HEADROOM THEMSELVES
     way: guessing "there's room" on missing data could exceed a real fuse
     limit, while guessing "no room" only costs a missed comfort/savings
     window.
+
+EIGHTH LEVER — INDOOR-TEMPERATURE CEILING, A SECOND GATE (Fas 4f, 2026-10-09)
+    Found during a Håkan-requested two-day operations review (2026-10-09):
+    number.heat_offset_s1_47011 had sat at +2 almost continuously for ~44
+    hours (2026-10-07 22:45 to 2026-10-09 17:49, one short gap for an
+    unrelated Modbus outage), because cheap_price_percentile=0.5 means
+    "cheaper than today's median" — true of roughly half of every day's
+    hours by construction, often in one contiguous overnight block — and
+    nothing in this module ever considered actual comfort need before this.
+    Indoor temperature (climate.f750_climate_system_s1's
+    current_temperature) climbed to 24.7°C against a 21.5°C target over
+    that stretch: real energy spent overheating the house well past
+    comfort, not a short, targeted pre-heat ahead of a price peak.
+
+    The very first design draft for this module (the pre-H.E.M. pyscript
+    prototype, claude/nibe_price_control.py) already had exactly this
+    safeguard — MIN_INDOOR_TEMP/MAX_INDOOR_TEMP, "comfort override always
+    wins over price optimization" — but it was never carried into this
+    package's rewrite. This lever reinstates the MAX_INDOOR_TEMP half of
+    that idea (the MIN half is a separate, not-yet-built concern: nothing
+    here currently stops the pump from running too COLD, only too hot).
+
+    Gate, not an exception, same shape as the FOURTH LEVER's degree-minutes
+    floor: indoor_temp_c >= max_indoor_temp_c blocks the three BOOST
+    branches (solar / cheap-price / spike) only, checked alongside
+    dm_blocked, never the FIFTH LEVER's price-reduction branch — a
+    negative offset asks for LESS heat, which this ceiling has no reason
+    to prevent; if anything a hot house is exactly when a price-driven
+    reduction is welcome. heat_offset_c resolves to 0 (neutral), not
+    negative — same "a ceiling only withholds, it doesn't demand" choice
+    the degree-minutes floor already made. Bypasses anti-flap entirely,
+    also mirroring the degree-minutes floor: a suppressed downgrade could
+    otherwise leave a boost in place past the point the ceiling says it
+    should stop.
+
+    Not gated by its own nibe.*_enabled flag — live as soon as nibe.enabled
+    itself is on, same "a safety/comfort floor doesn't need a separate
+    switch" precedent as degree_minutes_floor and upgrade_cooldown_s above.
+    Unlike those two, though, this one is NOT a no-behavior-change-on-
+    upgrade default: DEFAULT_MAX_INDOOR_TEMP_C (22.5°C) is deliberately set
+    to actually engage given Håkan's own observed 23-24.7°C stretch — the
+    whole point of adding it now is to change that behavior, not preserve
+    it. Missing indoor_temp_c (None — entity unavailable, HA unreachable)
+    does not block, same burden-of-proof convention as every other input
+    in this module: no evidence the house is too warm is not evidence that
+    it is.
+
+    When both dm_blocked and the indoor-temperature ceiling would block
+    the same cycle, the indoor-temperature reason is reported — it's the
+    more directly actionable one for whoever reads the dashboard status,
+    and nothing is lost: both still correctly veto every boost branch.
 """
 
 from dataclasses import dataclass
@@ -444,23 +497,32 @@ DEFAULT_UPGRADE_COOLDOWN_S = 1200
 # revisit if Nibe's own documented guidance for this model is ever found.
 DEFAULT_MAX_CONTINUOUS_ECONOMY_S = 259200.0
 
+# Fas 4f (2026-10-09) — see module docstring's EIGHTH LEVER section. 22.5°C
+# matches the original pyscript prototype's MAX_INDOOR_TEMP, and sits 1°C
+# above Håkan's observed 21.5°C climate target — enough headroom that a
+# normal, brief overshoot doesn't fight the boost lever, but low enough to
+# actually have stopped the 24.7°C stretch this lever was added because of.
+DEFAULT_MAX_INDOOR_TEMP_C = 22.5
+
 
 @dataclass(frozen=True)
 class HeatingBoostDecision:
     """Whether the space-heating curve-offset lever should be engaged this cycle.
 
     status: "no_data" | "watchdog_reset" | "no_headroom" |
-        "blocked_low_degree_minutes" | "engaged_cheap_price" |
-        "engaged_solar_surplus" | "engaged_price_spike_ahead" |
-        "reduced_expensive_price" | "suppressed_anti_flap" | "normal"
+        "blocked_low_degree_minutes" | "blocked_high_indoor_temp" |
+        "engaged_cheap_price" | "engaged_solar_surplus" |
+        "engaged_price_spike_ahead" | "reduced_expensive_price" |
+        "suppressed_anti_flap" | "normal"
     heat_offset_c: the value to write to number.heat_offset_s1_47011 —
         DEFAULT_HEAT_OFFSET_BOOST_C while boosting (any of the three
         "engaged_*" statuses), DEFAULT_HEAT_OFFSET_REDUCTION_C while
         actively reducing ("reduced_expensive_price"), the held-over
         previous value while anti-flap is suppressing an upgrade
-        ("suppressed_anti_flap"), 0 for Normal, watchdog_reset, or
-        blocked_low_degree_minutes, None only for no_data (don't touch the
-        register at all that cycle).
+        ("suppressed_anti_flap"), 0 for Normal, watchdog_reset,
+        blocked_low_degree_minutes, or blocked_high_indoor_temp (see
+        module docstring's EIGHTH LEVER section), None only for no_data
+        (don't touch the register at all that cycle).
     """
 
     status: str
@@ -544,6 +606,8 @@ def decide_heating_boost(
     previous_heat_offset_c: int | None = None,
     seconds_since_offset_last_changed: float | None = None,
     upgrade_cooldown_s: float = DEFAULT_UPGRADE_COOLDOWN_S,
+    indoor_temp_c: float | None = None,
+    max_indoor_temp_c: float = DEFAULT_MAX_INDOOR_TEMP_C,
 ) -> HeatingBoostDecision:
     """Pure decision for the space-heating curve-offset comfort-boost lever.
 
@@ -591,8 +655,19 @@ def decide_heating_boost(
         upgrade_cooldown_s of the last change. Both state inputs default to
         None (no suppression without proof there's something to suppress
         against). Never applied to the hard safety statuses above
-        (no_data, watchdog_reset, no_headroom, blocked_low_degree_minutes)
-        — only to the comfort outcome below.
+        (no_data, watchdog_reset, no_headroom, blocked_low_degree_minutes,
+        blocked_high_indoor_temp) — only to the comfort outcome below.
+    indoor_temp_c: live climate.f750_climate_system_s1 current_temperature
+        reading (see module docstring's EIGHTH LEVER section), or None if
+        unavailable. A gate, not an exception — checked alongside the
+        degree-minutes floor, before any of the three boost exceptions
+        below, so it can only suppress a boost, never cause one. Never
+        gates the price-reduction branch further down — a negative offset
+        only reduces compressor demand, which an indoor-temperature
+        ceiling has no reason to prevent. None (missing data) does not
+        block — same burden-of-proof convention as everywhere else here.
+    max_indoor_temp_c: the ceiling indoor_temp_c is compared against.
+        Defaults to DEFAULT_MAX_INDOOR_TEMP_C.
     """
     headroom = _headroom_available(
         governor_enabled=governor_enabled,
@@ -650,9 +725,16 @@ def decide_heating_boost(
     # chance to run before this module falls back to reporting the block.
     dm_blocked = degree_minutes is not None and degree_minutes <= degree_minutes_floor
 
+    # Fas 4f gate (EIGHTH LEVER): same shape and same "can only suppress a
+    # boost, never cause one" contract as dm_blocked above — see the module
+    # docstring for the full reasoning.
+    indoor_temp_blocked = (
+        indoor_temp_c is not None and indoor_temp_c >= max_indoor_temp_c
+    )
+
     natural: HeatingBoostDecision | None = None
 
-    if not dm_blocked:
+    if not dm_blocked and not indoor_temp_blocked:
         if solar_surplus_kw is not None and solar_surplus_kw > min_solar_surplus_kw:
             natural = HeatingBoostDecision(
                 status="engaged_solar_surplus",
@@ -720,11 +802,23 @@ def decide_heating_boost(
                 ),
             )
 
-    if natural is None and dm_blocked:
+    if natural is None and (dm_blocked or indoor_temp_blocked):
         # Hard safety status — bypasses anti-flap entirely (see SIXTH
         # section in the module docstring): a suppressed downgrade could
-        # otherwise leave a boost in place past the point the DM floor says
-        # it should stop.
+        # otherwise leave a boost in place past the point the gate says it
+        # should stop. When both gates are active, the indoor-temperature
+        # reason is reported (see EIGHTH LEVER in the module docstring) —
+        # both still correctly veto every boost branch either way.
+        if indoor_temp_blocked:
+            return HeatingBoostDecision(
+                status="blocked_high_indoor_temp",
+                heat_offset_c=0,
+                reason=(
+                    f"indoor temp {indoor_temp_c:.1f}°C >= ceiling "
+                    f"{max_indoor_temp_c:.1f}°C — house is already warm "
+                    "enough, staying at neutral offset regardless of price"
+                ),
+            )
         return HeatingBoostDecision(
             status="blocked_low_degree_minutes",
             heat_offset_c=0,

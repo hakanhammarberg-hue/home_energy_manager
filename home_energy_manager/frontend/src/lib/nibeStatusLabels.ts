@@ -18,6 +18,7 @@ export type HeatingStatus =
   | 'no_data'
   | 'no_headroom'
   | 'blocked_low_degree_minutes'
+  | 'blocked_high_indoor_temp'
   | 'engaged_cheap_price'
   | 'engaged_solar_surplus'
   | 'engaged_price_spike_ahead'
@@ -41,6 +42,7 @@ export const HEATING_STATUS_LABELS: Record<HeatingStatus, string> = {
   no_data: 'Ingen data',
   no_headroom: 'Normalläge — effektvakten saknar utrymme',
   blocked_low_degree_minutes: 'Normalläge — gradminutsgolv når (eltillsatsrisk)',
+  blocked_high_indoor_temp: 'Normalläge — huset är redan varmt nog',
   engaged_cheap_price: 'Extra värme — billig timme',
   engaged_solar_surplus: 'Extra värme — solöverskott',
   engaged_price_spike_ahead: 'Extra värme — förvärmer inför kommande prisspik',
@@ -54,6 +56,7 @@ export const HEATING_STATUS_COLORS: Record<HeatingStatus, StatusColor> = {
   no_data: 'red',
   no_headroom: 'yellow',
   blocked_low_degree_minutes: 'yellow',
+  blocked_high_indoor_temp: 'yellow',
   engaged_cheap_price: 'green',
   engaged_solar_surplus: 'green',
   engaged_price_spike_ahead: 'green',

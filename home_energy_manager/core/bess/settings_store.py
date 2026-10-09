@@ -652,6 +652,16 @@ class SettingsStore:
             # degree_minutes_floor's "safety floors don't need their own
             # switch" precedent even though this one pushes the opposite
             # direction — see decision.py's SEVENTH section).
+            # Fas 4f (2026-10-09) added max_indoor_temp_c — an indoor-
+            # temperature ceiling on the boost lever, same "no separate
+            # enabled flag, live whenever nibe.enabled is on" shape as
+            # degree_minutes_floor (see decision.py's EIGHTH LEVER
+            # section). UNLIKE every other field added to this section so
+            # far, 22.5 is NOT a no-behavior-change-on-upgrade default — a
+            # two-day operations review (2026-10-09) found the boost lever
+            # had kept the house at 23-24.7°C against a 21.5°C target for
+            # ~44 hours straight, and 22.5 is deliberately chosen to
+            # actually stop that, not preserve it.
             "nibe": {
                 "enabled": False,
                 "dhw_luxury_enabled": False,
@@ -667,6 +677,7 @@ class SettingsStore:
                 "heat_offset_reduction_c": -2,
                 "upgrade_cooldown_s": 1200.0,
                 "max_continuous_economy_s": 259200.0,
+                "max_indoor_temp_c": 22.5,
                 # Added 2026-10-05, revised 2026-10-06 — Håkan asked for a
                 # Nibe "max allowed power" setting, modelled on the pump's
                 # own "effektvakt" (power-guard) function. Investigated
@@ -999,6 +1010,7 @@ class SettingsStore:
                 "heat_offset_reduction_c": -2,
                 "upgrade_cooldown_s": 1200.0,
                 "max_continuous_economy_s": 259200.0,
+                "max_indoor_temp_c": 22.5,
             }
             changed = True
         elif isinstance(self.data.get("nibe"), dict):
@@ -1024,6 +1036,14 @@ class SettingsStore:
                 "heat_offset_reduction_c": -2,
                 "upgrade_cooldown_s": 1200.0,
                 "max_continuous_economy_s": 259200.0,
+                # max_indoor_temp_c (Fas 4f, 2026-10-09) — see this
+                # section's top-level default dict above for the full
+                # story. Deliberately NOT a no-behavior-change backfill
+                # like every other key in this dict: an existing install
+                # whose indoor temp is already at/above 22.5°C will see
+                # the boost lever start backing off starting this upgrade,
+                # which is the intended fix, not a side effect to avoid.
+                "max_indoor_temp_c": 22.5,
                 # effektvakt_* added 2026-10-05, revised 2026-10-06 — see
                 # this section's top-level default dict above for the full
                 # story. Off/inert on backfill, same no-behavior-change

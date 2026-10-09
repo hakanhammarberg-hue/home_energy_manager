@@ -146,6 +146,17 @@ NIBE_EFFEKTVAKT_FUSE_ENTITY = "number.fuse_47214"
 # 16-bit register is the one that actually answers on this F750.
 NIBE_DEGREE_MINUTES_ENTITY = "number.degree_minutes_16_bit_43005"
 
+# Fas 4f (2026-10-09): indoor-temperature ceiling input — see
+# core/nibe/decision.py's EIGHTH LEVER section. Same climate entity as
+# core/nibe/history.py's own CLIMATE_ENTITY constant (for its hourly-chart
+# use, a different read path) — kept as an independent copy here rather
+# than importing that module's constant, same "two read paths, two
+# independent copies" precedent NIBE_DEGREE_MINUTES_ENTITY above already
+# sets for this file. Unlike every other constant in this block, the value
+# needed is an ATTRIBUTE (current_temperature), not the entity's main
+# state — see _read_raw_entity_attribute() below.
+NIBE_INDOOR_TEMP_ENTITY = "climate.f750_climate_system_s1"
+
 # Dashboard diagnostics addition (2026-09-03), same stopgap as the constants
 # above: read from a live 3-day check-in (see that day's conversation) that
 # the inverter's remote-control permission (select.*_vpp_remote_control)
@@ -656,6 +667,27 @@ class BESSController:
             return None
         return state
 
+    def _read_raw_entity_attribute(self, entity_id: str, attribute: str) -> str | None:
+        """Read one attribute off a raw HA entity state — same defensive
+        contract as _read_raw_entity_state() just above (None on any
+        failure/missing-data case, never a raised exception), but for an
+        entity whose value of interest lives under "attributes" rather
+        than "state" itself (e.g. a climate entity's current_temperature).
+        Added Fas 4f (2026-10-09) for NIBE_INDOOR_TEMP_ENTITY; written
+        generically since nothing about it is Nibe-specific.
+        """
+        try:
+            raw = self.ha_controller.get_entity_state_raw(entity_id)
+        except requests.RequestException as e:
+            logger.warning("Could not read %s: %s", entity_id, e)
+            return None
+        if raw is None:
+            return None
+        value = raw.get("attributes", {}).get(attribute)
+        if value in ("unavailable", "unknown", None):
+            return None
+        return value
+
     @staticmethod
     def _to_float(raw: str | None) -> float | None:
         """Same defensive parse as ZaptecController._to_float — a state
@@ -1163,6 +1195,18 @@ class BESSController:
         except ValueError:
             degree_minutes = None
 
+        # Fas 4f (2026-10-09): indoor-temperature ceiling — see
+        # nibe_decision's EIGHTH LEVER section. A raw attribute read, same
+        # "always gathered, let the pure function decide whether it
+        # matters" shape as degree_minutes above.
+        indoor_temp_raw = self._read_raw_entity_attribute(
+            NIBE_INDOOR_TEMP_ENTITY, "current_temperature"
+        )
+        try:
+            indoor_temp_c = None if indoor_temp_raw is None else float(indoor_temp_raw)
+        except (TypeError, ValueError):
+            indoor_temp_c = None
+
         # Fas 4e (2026-09-26): anti-flap/hysteresis inputs — see
         # nibe_decision's SIXTH section. seconds_since_offset_last_changed
         # is computed from the *previous* tick's stored timestamp, before
@@ -1214,6 +1258,10 @@ class BESSController:
             seconds_since_offset_last_changed=seconds_since_offset_last_changed,
             upgrade_cooldown_s=nibe_settings.get(
                 "upgrade_cooldown_s", nibe_decision.DEFAULT_UPGRADE_COOLDOWN_S
+            ),
+            indoor_temp_c=indoor_temp_c,
+            max_indoor_temp_c=nibe_settings.get(
+                "max_indoor_temp_c", nibe_decision.DEFAULT_MAX_INDOOR_TEMP_C
             ),
         )
         self.nibe_heating_last_decision = heating_decision
