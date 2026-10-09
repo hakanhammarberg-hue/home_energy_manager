@@ -1348,6 +1348,7 @@ class BESSController:
         if dhw_decision.status in (
             "forced_normal_legionella_guard",
             "disabled_reset_from_luxury",
+            "disabled_reset_from_economy",
         ):
             logger.warning("nibe dhw: %s", dhw_decision.reason)
         else:

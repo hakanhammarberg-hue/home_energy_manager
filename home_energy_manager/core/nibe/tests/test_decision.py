@@ -862,10 +862,30 @@ def test_dhw_luxury_disabled_is_a_pure_noop():
     assert d.comfort_mode is None
 
 
-def test_dhw_luxury_disabled_is_still_a_noop_when_current_mode_is_economy():
-    # Disabled + a manual Economy/Normal/Smart Control choice on the pump's
-    # own panel must stay completely untouched — only a stray Luxury should
-    # ever trigger the 2026-10-07 reset below.
+def test_dhw_luxury_disabled_is_still_a_noop_when_current_mode_is_normal():
+    # Disabled + a manual Normal/Smart Control choice on the pump's own
+    # panel must stay completely untouched — only a stray Luxury or Economy
+    # (this lever's own two possible residues) should ever trigger a reset.
+    d = decide_dhw_luxury(
+        enabled=False,
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=CHEAP_TODAY,
+        solar_surplus_kw=5.0,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        current_comfort_mode="NORMAL",
+    )
+    assert d.status == "disabled"
+    assert d.comfort_mode is None
+
+
+def test_dhw_luxury_disabled_resets_a_stuck_economy_register_to_normal():
+    # Real incident, 2026-10-09: Lyxläge was enabled with no cheap-price or
+    # solar-surplus exception active, so economy_no_condition landed it on
+    # Economy (~45°C hot water) within 20 minutes — then disabled a few
+    # hours later, leaving it stuck there because the 2026-10-07 fix only
+    # recognised a stray LUXURY as this lever's own residue.
     d = decide_dhw_luxury(
         enabled=False,
         spot_price_ore_per_kwh=10.0,
@@ -876,8 +896,23 @@ def test_dhw_luxury_disabled_is_still_a_noop_when_current_mode_is_economy():
         target_kw=None,
         current_comfort_mode="ECONOMY",
     )
-    assert d.status == "disabled"
-    assert d.comfort_mode is None
+    assert d.status == "disabled_reset_from_economy"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_luxury_disabled_economy_reset_check_is_case_insensitive():
+    d = decide_dhw_luxury(
+        enabled=False,
+        spot_price_ore_per_kwh=None,
+        today_prices_ore_per_kwh=None,
+        solar_surplus_kw=None,
+        governor_enabled=False,
+        current_kw=None,
+        target_kw=None,
+        current_comfort_mode="economy",
+    )
+    assert d.status == "disabled_reset_from_economy"
+    assert d.comfort_mode == "normal"
 
 
 def test_dhw_luxury_disabled_resets_a_stuck_luxury_register_to_normal():
