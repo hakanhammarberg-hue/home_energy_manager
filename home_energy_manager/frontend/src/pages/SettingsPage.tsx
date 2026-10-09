@@ -136,6 +136,20 @@ const SettingsPage: React.FC = () => {
   const [savedEffektvaktBaselineKw, setSavedEffektvaktBaselineKw] = useState(3.0);
   const [effektvaktFloorKw, setEffektvaktFloorKw] = useState(1.0);
   const [savedEffektvaktFloorKw, setSavedEffektvaktFloorKw] = useState(1.0);
+  // Fas 6 (2026-10-09): anti-dormancy wake-up pulse — see
+  // core/bess/battery_override.py's module docstring. Only the automatic
+  // pulse's settings live here; the manual force-charge override itself
+  // (overrideForceChargeUntil) is managed exclusively by the dashboard
+  // button/BatteryOverrideCard, not editable from Settings — see
+  // backend/battery_override_api.py's PATCH validation for why.
+  const [antiDormancyEnabled, setAntiDormancyEnabled] = useState(false);
+  const [savedAntiDormancyEnabled, setSavedAntiDormancyEnabled] = useState(false);
+  const [antiDormancySocThreshold, setAntiDormancySocThreshold] = useState(15.0);
+  const [savedAntiDormancySocThreshold, setSavedAntiDormancySocThreshold] = useState(15.0);
+  const [antiDormancyIdleMinutes, setAntiDormancyIdleMinutes] = useState(30.0);
+  const [savedAntiDormancyIdleMinutes, setSavedAntiDormancyIdleMinutes] = useState(30.0);
+  const [antiDormancyPulseMinutes, setAntiDormancyPulseMinutes] = useState(5.0);
+  const [savedAntiDormancyPulseMinutes, setSavedAntiDormancyPulseMinutes] = useState(5.0);
 
   // ── saved snapshots (for dirty detection) ──────────────────────────────
   const savedBattery = useRef<string>('');
@@ -184,7 +198,11 @@ const SettingsPage: React.FC = () => {
       nibeMinSolarSurplusKw !== savedNibeMinSolarSurplusKw ||
       effektvaktGovernorEnabled !== savedEffektvaktGovernorEnabled ||
       effektvaktBaselineKw !== savedEffektvaktBaselineKw ||
-      effektvaktFloorKw !== savedEffektvaktFloorKw,
+      effektvaktFloorKw !== savedEffektvaktFloorKw ||
+      antiDormancyEnabled !== savedAntiDormancyEnabled ||
+      antiDormancySocThreshold !== savedAntiDormancySocThreshold ||
+      antiDormancyIdleMinutes !== savedAntiDormancyIdleMinutes ||
+      antiDormancyPulseMinutes !== savedAntiDormancyPulseMinutes,
   };
 
   // ── loading / saving / error state ────────────────────────────────────
@@ -351,6 +369,16 @@ const SettingsPage: React.FC = () => {
       setSavedEffektvaktBaselineKw(nibe.effektvaktBaselineKw ?? 3.0);
       setEffektvaktFloorKw(nibe.effektvaktFloorKw ?? 1.0);
       setSavedEffektvaktFloorKw(nibe.effektvaktFloorKw ?? 1.0);
+
+      const batteryOverride = s.batteryOverride ?? {};
+      setAntiDormancyEnabled(batteryOverride.antiDormancyEnabled ?? false);
+      setSavedAntiDormancyEnabled(batteryOverride.antiDormancyEnabled ?? false);
+      setAntiDormancySocThreshold(batteryOverride.antiDormancySocThreshold ?? 15.0);
+      setSavedAntiDormancySocThreshold(batteryOverride.antiDormancySocThreshold ?? 15.0);
+      setAntiDormancyIdleMinutes(batteryOverride.antiDormancyIdleMinutes ?? 30.0);
+      setSavedAntiDormancyIdleMinutes(batteryOverride.antiDormancyIdleMinutes ?? 30.0);
+      setAntiDormancyPulseMinutes(batteryOverride.antiDormancyPulseMinutes ?? 5.0);
+      setSavedAntiDormancyPulseMinutes(batteryOverride.antiDormancyPulseMinutes ?? 5.0);
 
       if (healthRes.data?.checks) {
         const map: Record<string, HealthStatus> = {};
@@ -668,6 +696,12 @@ const SettingsPage: React.FC = () => {
           effektvaktBaselineKw: effektvaktBaselineKw,
           effektvaktFloorKw: effektvaktFloorKw,
         },
+        batteryOverride: {
+          antiDormancyEnabled: antiDormancyEnabled,
+          antiDormancySocThreshold: antiDormancySocThreshold,
+          antiDormancyIdleMinutes: antiDormancyIdleMinutes,
+          antiDormancyPulseMinutes: antiDormancyPulseMinutes,
+        },
       });
       setSavedDemoEnabled(demoEnabled);
       savedAi.current = JSON.stringify(aiForm);
@@ -685,6 +719,10 @@ const SettingsPage: React.FC = () => {
       setSavedEffektvaktGovernorEnabled(effektvaktGovernorEnabled);
       setSavedEffektvaktBaselineKw(effektvaktBaselineKw);
       setSavedEffektvaktFloorKw(effektvaktFloorKw);
+      setSavedAntiDormancyEnabled(antiDormancyEnabled);
+      setSavedAntiDormancySocThreshold(antiDormancySocThreshold);
+      setSavedAntiDormancyIdleMinutes(antiDormancyIdleMinutes);
+      setSavedAntiDormancyPulseMinutes(antiDormancyPulseMinutes);
       window.dispatchEvent(new Event('bess:demo-mode-changed'));
       setToast({ type: 'success', message: 'System settings saved.' });
     } catch (err) {
@@ -1009,6 +1047,39 @@ const SettingsPage: React.FC = () => {
                   inställt på pumpens egen panel (Max int. add. power) — om du ändrar det där,
                   uppdatera detta fält till samma värde. Se Nibe drift-sidan för live-avläsningen
                   och aktuell status.
+                </p>
+              </SectionCard>
+
+              {/* Fas 6 (2026-10-09): battery anti-dormancy wake-up pulse */}
+              <SectionCard
+                title="Batteri — väckning (anti-dvala)"
+                description="Laddar batteriet med en kort puls då och då om SOC är lågt och batteriet stått stilla länge, för att förhindra att BMS:en somnar (se driftloggen, punkt 33/34/40). Den manuella tvångsladdningsknappen ligger på Dashboard, inte här."
+              >
+                {toggle('Väckningspuls aktiverad', antiDormancyEnabled, setAntiDormancyEnabled)}
+                {numField(
+                  'SOC-tröskel',
+                  antiDormancySocThreshold,
+                  setAntiDormancySocThreshold,
+                  { min: 0, max: 100, step: 1, unit: '%' },
+                )}
+                {numField(
+                  'Stillastående innan puls',
+                  antiDormancyIdleMinutes,
+                  setAntiDormancyIdleMinutes,
+                  { min: 1, max: 180, step: 5, unit: 'min' },
+                )}
+                {numField(
+                  'Pulslängd',
+                  antiDormancyPulseMinutes,
+                  setAntiDormancyPulseMinutes,
+                  { min: 1, max: 60, step: 1, unit: 'min' },
+                )}
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  En puls startar bara om batteriets effekt (laddning/urladdning) legat under 10 W
+                  i hela "stillastående innan puls"-perioden och SOC är på eller under tröskeln.
+                  En redan startad puls körs klart även om du stänger av brytaren mitt i. Pulsen
+                  skrivs till växelriktaren var 30:e sekund av samma logik som
+                  tvångsladdningsknappen — effektvakten skyddar huvudsäkringen som vanligt.
                 </p>
               </SectionCard>
 

@@ -313,6 +313,7 @@ _SECTION_MAP: dict[str, str] = {
     "governor": "governor",
     "evScheduler": "ev_scheduler",
     "nibe": "nibe",
+    "batteryOverride": "battery_override",
 }
 
 
@@ -618,6 +619,61 @@ async def patch_settings(updates: dict):
                         status_code=422,
                         detail=(
                             "ev_scheduler.cheap_price_percentile must be between 0 and 1"
+                        ),
+                    )
+
+            if store_key == "battery_override":
+                # override_force_charge_until is managed exclusively by
+                # POST /api/battery/override and /api/battery/override/cancel
+                # (see backend/battery_override_api.py's docstring) — same
+                # reasoning as ev_scheduler.override_requested in
+                # backend/ev_scheduler_api.py: keep "when it takes effect,
+                # when it resets" logic in one place, not duplicated here.
+                if "override_force_charge_until" in snake_data:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "batteryOverride.overrideForceChargeUntil cannot be set "
+                            "directly — use POST /api/battery/override instead"
+                        ),
+                    )
+                soc_threshold = snake_data.get("anti_dormancy_soc_threshold")
+                if soc_threshold is not None and (
+                    not isinstance(soc_threshold, (int, float))
+                    or isinstance(soc_threshold, bool)
+                    or not (0 < soc_threshold <= 100)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "batteryOverride.antiDormancySocThreshold must be "
+                            "between 0 and 100"
+                        ),
+                    )
+                idle_minutes = snake_data.get("anti_dormancy_idle_minutes")
+                if idle_minutes is not None and (
+                    not isinstance(idle_minutes, (int, float))
+                    or isinstance(idle_minutes, bool)
+                    or idle_minutes <= 0
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "batteryOverride.antiDormancyIdleMinutes must be "
+                            "greater than zero"
+                        ),
+                    )
+                pulse_minutes = snake_data.get("anti_dormancy_pulse_minutes")
+                if pulse_minutes is not None and (
+                    not isinstance(pulse_minutes, (int, float))
+                    or isinstance(pulse_minutes, bool)
+                    or not (0 < pulse_minutes <= 60)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "batteryOverride.antiDormancyPulseMinutes must be "
+                            "between 0 and 60"
                         ),
                     )
 

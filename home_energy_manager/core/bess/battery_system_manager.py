@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 
 import requests
 
-from . import time_utils
+from . import battery_override, time_utils
 from .consumption_overlay import apply_overlay, period_starts_from
 from .daily_view_builder import DailyView, DailyViewBuilder
 from .daily_view_store import DailyViewStore
@@ -199,6 +199,32 @@ class BatterySystemManager:
 
         self._runtime_failure_tracker = RuntimeFailureTracker()
         self._health_recovery_tracker = HealthRecoveryTracker()
+
+        # Fas 6 (2026-10-09) — manual force-charge override + anti-dormancy
+        # wake-up pulses. See core/bess/battery_override.py's module
+        # docstring for the full design. Both are ephemeral runtime state,
+        # same treatment as NibeController's own watchdog clocks — only
+        # the *setting* that requests a manual override
+        # (battery_override.override_force_charge_until) is persisted, in
+        # settings_store, which this class deliberately never touches
+        # directly (see poll_forced_charge's docstring).
+        self._anti_dormancy_pulse_until: datetime | None = None
+        self._last_nonzero_battery_power_ts: datetime | None = None
+        self._battery_override_last_decision: (
+            battery_override.ForcedChargeDecision | None
+        ) = None
+        # Cached from settings_store by poll_forced_charge's own 30s tick
+        # (the one method that receives it from backend/app.py, which is
+        # the only thing in this app allowed to read settings_store — see
+        # poll_forced_charge's docstring). update_battery_schedule and
+        # apply_discharge_inhibit both read this cached value instead of
+        # each taking their own fresh parameter, since poll_forced_charge's
+        # 30s cadence is always more frequent than either of theirs (15 min
+        # and 1 min). Starts None on every process start, including a
+        # restart mid-override — a safe default: it fails toward resuming
+        # normal DP control rather than toward staying stuck forcing a
+        # charge an operator may no longer want.
+        self._override_until: datetime | None = None
 
         # Historical-data-incomplete warning dismissal, keyed to the day and
         # the exact set of missing hours so a new gap (or the same gap
@@ -622,7 +648,18 @@ class BatterySystemManager:
     def update_battery_schedule(
         self, current_period: int, prepare_next_day: bool = False
     ) -> bool:
-        """Main schedule update method for quarterly resolution."""
+        """Main schedule update method for quarterly resolution.
+
+        Fas 6 (2026-10-09): reads self._override_until (cached by
+        poll_forced_charge from settings_store — this class never reads
+        settings_store itself, see that method's docstring) together with
+        self._anti_dormancy_pulse_until to decide, via battery_override.
+        is_forced_charge_window_open() (a read-only check), whether THIS
+        cycle's own hardware writes should be skipped so this method's
+        quarterly re-assertion of the DP's own plan doesn't fight the
+        dedicated 30s-cadence override/anti-dormancy writer
+        (poll_forced_charge) while a forced-charge window is open.
+        """
         if not self.is_configured:
             logger.warning(
                 "update_battery_schedule called on unconfigured system — skipping"
@@ -669,6 +706,21 @@ class BatterySystemManager:
             if current_soc is None:
                 logger.error("Failed to get battery SOC")
                 return False
+
+            # Fas 6 (2026-10-09): is a manual override or anti-dormancy
+            # pulse currently forcing grid_charge via poll_forced_charge's
+            # own 30s-cadence writes? If so, this cycle must not write to
+            # hardware at all below (see this method's own docstring and
+            # battery_override.py's module docstring for why) — the rest
+            # of the DP computation below still runs normally so the
+            # dashboard/accounting stay current.
+            forced_charge_window_open = battery_override.is_forced_charge_window_open(
+                now=time_utils.now(),
+                soc_percent=current_soc,
+                max_soc_percent=self.battery_settings.max_soc,
+                override_until=self._override_until,
+                pulse_until=self._anti_dormancy_pulse_until,
+            )
 
             # Gather optimization data
             optimization_data_result = self._gather_optimization_data(
@@ -733,6 +785,7 @@ class BatterySystemManager:
                     temp_schedule,
                     reason,
                     prepare_next_day,
+                    skip_hardware_write=forced_charge_window_open,
                 )
             else:
                 # Update display data even when nothing changes on hardware.
@@ -751,7 +804,19 @@ class BatterySystemManager:
                 # look at the inverter again until the plan itself changed.
                 # A no-op on platforms that rewrite everything anyway, and a
                 # no-op here too when the inverter already agrees.
-                if self._controller is not None and not prepare_next_day:
+                if forced_charge_window_open:
+                    # Fas 6: a manual override or anti-dormancy pulse owns
+                    # the hardware this cycle (see this method's own
+                    # docstring) — mark pending so the first quarterly
+                    # cycle after the window closes re-asserts the real
+                    # plan instead of assuming the inverter already
+                    # agrees with it.
+                    self._hardware_write_pending = True
+                    logger.info(
+                        "Skipping reconcile_hardware this cycle — forced-charge "
+                        "window open (will re-assert once it closes)"
+                    )
+                elif self._controller is not None and not prepare_next_day:
                     try:
                         self._inverter_controller.reconcile_hardware(
                             self._controller, current_period
@@ -781,12 +846,17 @@ class BatterySystemManager:
                 )
 
             # Apply current period settings
-            if not prepare_next_day:
+            if not prepare_next_day and not forced_charge_window_open:
                 self._apply_period_schedule(current_period)
                 logger.info(
                     "Applied period settings for period %d (%s)",
                     current_period,
                     format_period(current_period),
+                )
+            elif forced_charge_window_open:
+                logger.info(
+                    "Skipping per-period hardware write this cycle — "
+                    "forced-charge window open (see poll_forced_charge)"
                 )
 
             # Log the applied schedule tables and the DP results table only
@@ -2736,8 +2806,19 @@ class BatterySystemManager:
         temp_schedule: DPSchedule,
         reason: str,
         prepare_next_day: bool,
+        skip_hardware_write: bool = False,
     ) -> None:
-        """Apply schedule to hardware."""
+        """Apply schedule to hardware.
+
+        skip_hardware_write (Fas 6, 2026-10-09): True while a manual
+        force-charge override or anti-dormancy pulse owns the hardware
+        this cycle (see update_battery_schedule's own docstring and
+        core/bess/battery_override.py). The DP's plan is still recorded
+        (apply_intents, self._current_schedule) so accounting/display stay
+        current, but the actual hardware write is skipped and
+        _hardware_write_pending is set so the first cycle after the window
+        closes re-asserts it for real.
+        """
 
         logger.info("=" * 80)
         logger.info("=== SCHEDULE APPLICATION START ===")
@@ -2755,6 +2836,14 @@ class BatterySystemManager:
 
         effective_period = 0 if prepare_next_day else period
         self._inverter_controller.apply_intents(temp_schedule, effective_period)
+
+        if skip_hardware_write:
+            self._hardware_write_pending = True
+            logger.info(
+                "Skipping sync_to_hardware this cycle — forced-charge window "
+                "open (will re-assert once it closes)"
+            )
+            return
 
         try:
             if self._controller is None:
@@ -3743,6 +3832,21 @@ class BatterySystemManager:
         """
         if not self.is_configured:
             return
+
+        # Fas 6 (2026-10-09): same reasoning as update_battery_schedule's
+        # own guard — this method also calls apply_period() below, every
+        # minute, and would otherwise be a third independent writer that
+        # could undo a forced-charge window's grid_charge=True between
+        # poll_forced_charge's own 30s-cadence writes.
+        if battery_override.is_forced_charge_window_open(
+            now=time_utils.now(),
+            soc_percent=self._get_current_battery_soc(),
+            max_soc_percent=self.battery_settings.max_soc,
+            override_until=self._override_until,
+            pulse_until=self._anti_dormancy_pulse_until,
+        ):
+            return
+
         inhibit_active = self.controller.get_discharge_inhibit_active()
         target_rate = 0 if inhibit_active else self._desired_discharge_rate
 
@@ -3777,6 +3881,145 @@ class BatterySystemManager:
             self._at_reserve_floor(),
         )
         self._last_applied_discharge_rate = target_rate
+
+    def _update_last_nonzero_battery_power(self, now: datetime) -> None:
+        """Refresh the idle-tracking clock battery_override.decide_forced_charge
+        needs, from a live read of the inverter's own charge/discharge
+        power sensors.
+
+        Skips the update (leaves the previous timestamp as-is) when both
+        readings are unavailable, rather than guessing either way — a
+        transient sensor outage should not wrongly look like a long idle
+        stretch, nor wrongly look like fresh activity.
+        """
+        if self._controller is None:
+            return
+        try:
+            charge_w = self._controller.get_battery_charge_power()
+            discharge_w = self._controller.get_battery_discharge_power()
+        except Exception as e:
+            logger.debug(
+                "Could not read battery charge/discharge power for "
+                "anti-dormancy idle tracking: %s",
+                e,
+            )
+            return
+        if charge_w is None and discharge_w is None:
+            return
+        is_idle = (
+            abs(charge_w or 0) <= battery_override.IDLE_POWER_THRESHOLD_W
+            and abs(discharge_w or 0) <= battery_override.IDLE_POWER_THRESHOLD_W
+        )
+        if not is_idle:
+            self._last_nonzero_battery_power_ts = now
+
+    def poll_forced_charge(
+        self,
+        *,
+        override_until: datetime | None,
+        anti_dormancy_enabled: bool,
+        anti_dormancy_soc_threshold: float,
+        anti_dormancy_idle_minutes: float,
+        anti_dormancy_pulse_minutes: float,
+    ) -> battery_override.ForcedChargeDecision:
+        """30s-tick entry point for backend/app.py's _poll_battery_override
+        (Fas 6, 2026-10-09 — see core/bess/battery_override.py's module
+        docstring for the full design).
+
+        Reads current SOC and live charge/discharge power, calls
+        core.bess.battery_override.decide_forced_charge() (the one place
+        allowed to decide a window should start or end), and — if the
+        verdict says a window is active — writes grid_charge=True directly
+        to hardware via InverterController.apply_period(), bypassing the
+        DP-driven schedule entirely for this tick. update_battery_schedule
+        and apply_discharge_inhibit each independently check
+        is_forced_charge_window_open() (read-only) and skip their own
+        hardware writes whenever this says a window is open, so the paths
+        never fight over the same registers.
+
+        override_until/anti_dormancy_* are read from settings_store by
+        app.py's caller — this class never touches settings_store
+        directly. app.py is also responsible for persisting
+        override_force_charge_until=None when the returned decision's
+        override_cleared is True; this method only caches override_until
+        itself (self._override_until) for update_battery_schedule/
+        apply_discharge_inhibit to read, and tracks pulse state
+        (self._anti_dormancy_pulse_until) — both ephemeral runtime state,
+        not settings.
+        """
+        self._override_until = override_until
+
+        if not self.is_configured or self._controller is None:
+            decision = battery_override.ForcedChargeDecision(
+                active=False,
+                reason="none",
+                until=None,
+                override_cleared=False,
+                pulse_started=False,
+            )
+            self._battery_override_last_decision = decision
+            return decision
+
+        now = time_utils.now()
+        current_soc = self._get_current_battery_soc()
+        self._update_last_nonzero_battery_power(now)
+
+        decision = battery_override.decide_forced_charge(
+            now=now,
+            soc_percent=current_soc,
+            max_soc_percent=self.battery_settings.max_soc,
+            override_until=override_until,
+            anti_dormancy_enabled=anti_dormancy_enabled,
+            anti_dormancy_soc_threshold=anti_dormancy_soc_threshold,
+            anti_dormancy_idle_minutes=anti_dormancy_idle_minutes,
+            anti_dormancy_pulse_minutes=anti_dormancy_pulse_minutes,
+            last_nonzero_power_ts=self._last_nonzero_battery_power_ts,
+            pulse_until=self._anti_dormancy_pulse_until,
+        )
+
+        if decision.reason == "anti_dormancy" and decision.active:
+            self._anti_dormancy_pulse_until = decision.until
+        elif (
+            self._anti_dormancy_pulse_until is not None
+            and now >= self._anti_dormancy_pulse_until
+        ):
+            self._anti_dormancy_pulse_until = None
+
+        if decision.active:
+            try:
+                self._inverter_controller.apply_period(
+                    self._controller,
+                    True,  # grid_charge
+                    0,  # discharge_rate
+                    False,  # block_passive_charging
+                    "GRID_CHARGING",  # strategic_intent
+                )
+                logger.info(
+                    "Forced charge active (%s, until %s) — grid_charge=True written",
+                    decision.reason,
+                    decision.until,
+                )
+            except Exception as e:
+                logger.error(
+                    "Forced-charge write failed (%s): %s — will retry next tick",
+                    decision.reason,
+                    e,
+                )
+                self._runtime_failure_tracker.record_failure_once(
+                    category="battery_forced_charge",
+                    operation=f"Forced charge ({decision.reason})",
+                    error=e,
+                )
+
+        if decision.override_cleared:
+            logger.info(
+                "Manual force-charge override cleared (SOC cap reached or "
+                "time expired) — resuming normal DP-driven control"
+            )
+            self._override_until = None
+
+        self._battery_override_last_decision = decision
+        return decision
 
     def get_settings(self):
         """Get settings - return dataclasses directly for API layer conversion."""

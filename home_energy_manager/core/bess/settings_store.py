@@ -581,6 +581,17 @@ class SettingsStore:
                 "shared": {},
             },
             "demo_mode": {"enabled": False},
+            # Fas 6 (2026-10-09) — see core/bess/battery_override.py's
+            # module docstring. Fresh-install default mirrors the existing-
+            # install backfill a few hundred lines below in
+            # _migrate_schema() (search "battery_override section").
+            "battery_override": {
+                "override_force_charge_until": None,
+                "anti_dormancy_enabled": False,
+                "anti_dormancy_soc_threshold": 15.0,
+                "anti_dormancy_idle_minutes": 30.0,
+                "anti_dormancy_pulse_minutes": 5.0,
+            },
             # Fas 3b (2026-08-30) — off by default, same as demo_mode. The
             # target_kw default (12.0) matches
             # core.governor.peak_governor.DEFAULT_TARGET_KW, confirmed with
@@ -981,6 +992,26 @@ class SettingsStore:
             if "ev_max_current_a" not in self.data["governor"]:
                 self.data["governor"]["ev_max_current_a"] = 16.0
                 changed = True
+
+        # --- battery_override section (added Fas 6, 2026-10-09) --- see
+        # core/bess/battery_override.py's module docstring for the full
+        # story (manual force-charge override + anti-dormancy wake-up
+        # pulses, built after the confirmed BMS-dormancy incidents in
+        # punkt 33/34 of the project log). override_force_charge_until is
+        # None when no manual override is active; anti_dormancy_enabled
+        # defaults to False (no-behavior-change-on-upgrade, same
+        # convention as every other new lever's enabled flag in this
+        # file) even though the threshold/idle/pulse defaults below are
+        # Håkan's own confirmed numbers, not placeholders.
+        if "battery_override" not in self.data:
+            self.data["battery_override"] = {
+                "override_force_charge_until": None,
+                "anti_dormancy_enabled": False,
+                "anti_dormancy_soc_threshold": 15.0,
+                "anti_dormancy_idle_minutes": 30.0,
+                "anti_dormancy_pulse_minutes": 5.0,
+            }
+            changed = True
 
         # --- ev_scheduler section (added Fas 5b, 2026-08-31) ---
         if "ev_scheduler" not in self.data:

@@ -9,6 +9,7 @@ import SystemStatusCard from '../components/SystemStatusCard';
 import CompactStatusRow from '../components/CompactStatusRow';
 import BatterySocRangeCard from '../components/BatterySocRangeCard';
 import InverterWriteAccessCard from '../components/InverterWriteAccessCard';
+import BatteryOverrideCard from '../components/BatteryOverrideCard';
 import AlertBanner from '../components/AlertBanner';
 import { RuntimeFailureAlerts } from '../components/RuntimeFailureAlerts';
 import api from '../lib/api';
@@ -405,6 +406,19 @@ export default function DashboardPage({
             <div>
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Status</h2>
               <CompactStatusRow />
+            </div>
+          </div>
+
+          {/* Fas 6 (2026-10-09): manual force-charge override + the
+              anti-dormancy pulse's status line — see
+              BatteryOverrideCard.tsx's own docstring. Its own section
+              rather than folded into CompactStatusRow above: this is an
+              action control (a button + duration picker), not a passive
+              status tile, and deserves full width to show that. */}
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Batteri</h2>
+              <BatteryOverrideCard />
             </div>
           </div>
 

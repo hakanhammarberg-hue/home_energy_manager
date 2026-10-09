@@ -9,6 +9,7 @@ import time
 import traceback
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import log_config as _  # noqa: F401
 import requests
@@ -20,6 +21,7 @@ from apscheduler.events import EVENT_JOB_MISSED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from battery_override_api import router as battery_override_router
 from diagnostics_api import router as diagnostics_router
 from ev_scheduler_api import router as ev_scheduler_router
 from fastapi import FastAPI
@@ -32,7 +34,7 @@ from nibe_api import router as nibe_router
 from perific_api import router as perific_router
 
 # Import BESS system modules
-from core.bess import time_utils
+from core.bess import battery_override, time_utils
 from core.bess.battery_system_manager import BatterySystemManager
 from core.bess.exceptions import PriceDataUnavailableError
 from core.bess.ha_api_controller import HomeAssistantAPIController
@@ -258,6 +260,9 @@ app.include_router(nibe_router)
 # 2026-09-03: dashboard-only diagnostics (battery SOC range, inverter
 # write-access state) — see diagnostics_api.py's own docstring.
 app.include_router(diagnostics_router)
+# Fas 6: manual force-charge override + anti-dormancy wake-up pulses
+# (core.bess.battery_override / battery_override_api.py)
+app.include_router(battery_override_router)
 
 
 class BESSController:
@@ -1348,6 +1353,64 @@ class BESSController:
         else:
             logger.debug("nibe dhw: %s", dhw_decision.reason)
 
+    def _poll_battery_override(self) -> None:
+        """Fas 6 (2026-10-09): the 30s tick for the manual force-charge
+        override and anti-dormancy wake-up pulses — see
+        core/bess/battery_override.py's module docstring for the full
+        design, and punkt 33/34/40 of the project log for why Håkan asked
+        for this (two confirmed BMS-dormancy incidents).
+
+        Same cadence as _poll_ev_charging/_poll_nibe, and runs
+        unconditionally (not gated on a single `enabled` flag the way
+        those are) because a manual override request can arrive at any
+        time regardless of whether anti-dormancy itself is turned on —
+        battery_override.decide_forced_charge() is the one place that
+        actually decides whether anything should happen this tick.
+
+        This is the only place in the app that both reads
+        battery_override.* from settings_store AND calls
+        BatterySystemManager.poll_forced_charge() — see that method's own
+        docstring for why the split is this way (BatterySystemManager
+        never touches settings_store directly).
+        """
+        settings = self.settings_store.get_section("battery_override")
+
+        override_until_raw = settings.get("override_force_charge_until")
+        override_until = None
+        if override_until_raw:
+            try:
+                override_until = datetime.fromisoformat(override_until_raw)
+            except ValueError:
+                logger.warning(
+                    "Could not parse battery_override.override_force_charge_until "
+                    "= %r — treating as no override requested",
+                    override_until_raw,
+                )
+
+        decision = self.system.poll_forced_charge(
+            override_until=override_until,
+            anti_dormancy_enabled=settings.get("anti_dormancy_enabled", False),
+            anti_dormancy_soc_threshold=settings.get(
+                "anti_dormancy_soc_threshold",
+                battery_override.DEFAULT_ANTI_DORMANCY_SOC_THRESHOLD,
+            ),
+            anti_dormancy_idle_minutes=settings.get(
+                "anti_dormancy_idle_minutes",
+                battery_override.DEFAULT_ANTI_DORMANCY_IDLE_MINUTES,
+            ),
+            anti_dormancy_pulse_minutes=settings.get(
+                "anti_dormancy_pulse_minutes",
+                battery_override.DEFAULT_ANTI_DORMANCY_PULSE_MINUTES,
+            ),
+        )
+
+        if decision.override_cleared:
+            # Persist the clear — poll_forced_charge only cleared its own
+            # in-memory cache (self._override_until); settings_store is
+            # this method's job, not BatterySystemManager's.
+            settings["override_force_charge_until"] = None
+            self.settings_store.save_section("battery_override", settings)
+
     def _load_options(self):
         """Load InfluxDB options from /data/options.json.
 
@@ -1579,6 +1642,18 @@ class BESSController:
             self._poll_nibe,
             IntervalTrigger(seconds=30),
             id="nibe_poll",
+            misfire_grace_time=30,
+        )
+
+        # Fas 6 (2026-10-09): manual force-charge override + anti-dormancy
+        # wake-up pulses — see _poll_battery_override's own docstring. Same
+        # 30s cadence as the other levers' poll jobs above; a separate job
+        # rather than folded into ev_charging_poll/nibe_poll since neither
+        # of those touches the battery's own grid_charge register.
+        self.scheduler.add_job(
+            self._poll_battery_override,
+            IntervalTrigger(seconds=30),
+            id="battery_override_poll",
             misfire_grace_time=30,
         )
 
