@@ -53,7 +53,7 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-COPY backend/app.py backend/api.py backend/api_conversion.py backend/api_dataclasses.py backend/ai_chat.py backend/log_config.py backend/perific_api.py backend/governor_api.py backend/ev_scheduler_api.py backend/diagnostics_api.py backend/nibe_api.py backend/requirements.txt ./
+COPY backend/app.py backend/api.py backend/api_conversion.py backend/api_dataclasses.py backend/ai_chat.py backend/log_config.py backend/perific_api.py backend/governor_api.py backend/ev_scheduler_api.py backend/diagnostics_api.py backend/nibe_api.py backend/battery_override_api.py backend/requirements.txt ./
 
 COPY core/ /app/core/
 
