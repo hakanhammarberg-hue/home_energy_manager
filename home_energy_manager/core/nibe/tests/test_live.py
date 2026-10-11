@@ -11,10 +11,24 @@ from unittest.mock import Mock, patch
 from core.nibe.history import CLIMATE_ENTITY, DHW_ENTITY, HEAT_OFFSET_ENTITY
 from core.nibe.live import (
     CHARGE_PUMP_SPEED_ENTITY,
+    COMPR_ENERGY_HW_LIFETIME_ENTITY,
+    COMPR_ENERGY_TOTAL_LIFETIME_ENTITY,
     COMPR_POWER_ENTITY,
     COMPR_STATE_ENTITY,
     DEGREE_MINUTES_ENTITY,
+    DHW_ECONOMY_START_ENTITY,
+    DHW_ECONOMY_STOP_ENTITY,
+    DHW_LUXURY_START_ENTITY,
+    DHW_LUXURY_STOP_ENTITY,
+    EL_ADD_STATE_ENTITY,
+    HEAT_MEDIUM_PUMP_MODE_ENTITY,
+    HWC_PUMP_STATUS_ENTITY,
     PRIO_ENTITY,
+    SG_READY_HEATING_ENTITY,
+    SG_READY_HOT_WATER_ENTITY,
+    SMART_PRICE_ADAPTION_HW_MODE_ENTITY,
+    SMART_PRICE_ADAPTION_STATE_ENTITY,
+    SUPPLY_PUMP_STATE_ENTITY,
     fetch_live_snapshot,
 )
 
@@ -68,6 +82,20 @@ def test_full_snapshot_maps_every_field():
             "eco",
             {"current_temperature": 49.5, "target_temp_high": 52, "target_temp_low": 48},
         ),
+        COMPR_ENERGY_HW_LIFETIME_ENTITY: _state(COMPR_ENERGY_HW_LIFETIME_ENTITY, "12895.96"),
+        COMPR_ENERGY_TOTAL_LIFETIME_ENTITY: _state(COMPR_ENERGY_TOTAL_LIFETIME_ENTITY, "32615.49"),
+        EL_ADD_STATE_ENTITY: _state(EL_ADD_STATE_ENTITY, "0"),
+        SMART_PRICE_ADAPTION_STATE_ENTITY: _state(SMART_PRICE_ADAPTION_STATE_ENTITY, "10"),
+        SMART_PRICE_ADAPTION_HW_MODE_ENTITY: _state(SMART_PRICE_ADAPTION_HW_MODE_ENTITY, "ECO"),
+        HWC_PUMP_STATUS_ENTITY: _state(HWC_PUMP_STATUS_ENTITY, "on"),
+        SUPPLY_PUMP_STATE_ENTITY: _state(SUPPLY_PUMP_STATE_ENTITY, "ON"),
+        SG_READY_HEATING_ENTITY: _state(SG_READY_HEATING_ENTITY, "on"),
+        SG_READY_HOT_WATER_ENTITY: _state(SG_READY_HOT_WATER_ENTITY, "off"),
+        DHW_ECONOMY_START_ENTITY: _state(DHW_ECONOMY_START_ENTITY, "40"),
+        DHW_ECONOMY_STOP_ENTITY: _state(DHW_ECONOMY_STOP_ENTITY, "45"),
+        DHW_LUXURY_START_ENTITY: _state(DHW_LUXURY_START_ENTITY, "58"),
+        DHW_LUXURY_STOP_ENTITY: _state(DHW_LUXURY_STOP_ENTITY, "64"),
+        HEAT_MEDIUM_PUMP_MODE_ENTITY: _state(HEAT_MEDIUM_PUMP_MODE_ENTITY, "AUTO"),
     }
 
     with patch("core.nibe.live.requests.Session", return_value=_mock_session(states)):
@@ -84,6 +112,20 @@ def test_full_snapshot_maps_every_field():
     assert snapshot["dhwActualC"] == 49.5
     assert snapshot["dhwTargetHighC"] == 52.0
     assert snapshot["dhwTargetLowC"] == 48.0
+    assert snapshot["compressorEnergyHwKwh"] == 12895.96
+    assert snapshot["compressorEnergyTotalKwh"] == 32615.49
+    assert snapshot["electricAdditionStep"] == 0.0
+    assert snapshot["smartPriceAdaptionState"] == 10.0
+    assert snapshot["smartPriceAdaptionHwMode"] == "ECO"
+    assert snapshot["hwcPumpOn"] is True
+    assert snapshot["supplyPumpState"] == "ON"
+    assert snapshot["sgReadyHeating"] is True
+    assert snapshot["sgReadyHotWater"] is False
+    assert snapshot["dhwEconomyStartC"] == 40.0
+    assert snapshot["dhwEconomyStopC"] == 45.0
+    assert snapshot["dhwLuxuryStartC"] == 58.0
+    assert snapshot["dhwLuxuryStopC"] == 64.0
+    assert snapshot["heatMediumPumpMode"] == "AUTO"
 
 
 def test_unavailable_entity_reads_as_none_not_zero():
@@ -100,6 +142,24 @@ def test_unavailable_entity_reads_as_none_not_zero():
 
     assert snapshot["prio"] == "OFF"
     assert snapshot["compressorPowerKw"] is None
+
+
+def test_unavailable_boolean_register_reads_as_none_not_false():
+    """bool_of's whole reason to exist (added 2026-10-11 alongside
+    hwcPumpOn/sgReadyHeating/sgReadyHotWater): an unavailable on/off
+    register must stay None, not collapse to a fabricated False that would
+    look like a confirmed "off" reading."""
+    states = {
+        PRIO_ENTITY: _state(PRIO_ENTITY, "OFF"),
+        # HWC_PUMP_STATUS_ENTITY/SG_READY_* deliberately omitted
+    }
+
+    with patch("core.nibe.live.requests.Session", return_value=_mock_session(states)):
+        snapshot = fetch_live_snapshot(BASE_URL, HEADERS)
+
+    assert snapshot["hwcPumpOn"] is None
+    assert snapshot["sgReadyHeating"] is None
+    assert snapshot["sgReadyHotWater"] is None
 
 
 def test_everything_unavailable_returns_empty_dict():

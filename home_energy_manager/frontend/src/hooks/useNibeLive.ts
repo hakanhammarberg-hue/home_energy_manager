@@ -44,6 +44,26 @@ export interface NibeLiveResponse {
     // not a read failure. See core/nibe/live.py's comment.
     effektvaktMaxPowerKw: number | null;
     effektvaktFuseRatingA: number | null;
+    // Added 2026-10-11 — "more data" pass on the live tiles (Håkan asked
+    // for "all tillgänglig data"). See core/nibe/live.py's own comment for
+    // exactly why the airflow/fan-speed registers he also asked about
+    // ("lufthastighetsgivare") are NOT here: they're registered in HA but
+    // have never had a real state, even after a config-entry reload — the
+    // pump itself was never configured to transmit those specific coils.
+    compressorEnergyHwKwh: number | null;
+    compressorEnergyTotalKwh: number | null;
+    electricAdditionStep: number | null;
+    smartPriceAdaptionState: number | null;
+    smartPriceAdaptionHwMode: string | null;
+    hwcPumpOn: boolean | null;
+    supplyPumpState: string | null;
+    sgReadyHeating: boolean | null;
+    sgReadyHotWater: boolean | null;
+    dhwEconomyStartC: number | null;
+    dhwEconomyStopC: number | null;
+    dhwLuxuryStartC: number | null;
+    dhwLuxuryStopC: number | null;
+    heatMediumPumpMode: string | null;
   };
 }
 
@@ -71,6 +91,20 @@ const EMPTY_LIVE: NibeLiveResponse = {
     dhwTargetLowC: null,
     effektvaktMaxPowerKw: null,
     effektvaktFuseRatingA: null,
+    compressorEnergyHwKwh: null,
+    compressorEnergyTotalKwh: null,
+    electricAdditionStep: null,
+    smartPriceAdaptionState: null,
+    smartPriceAdaptionHwMode: null,
+    hwcPumpOn: null,
+    supplyPumpState: null,
+    sgReadyHeating: null,
+    sgReadyHotWater: null,
+    dhwEconomyStartC: null,
+    dhwEconomyStopC: null,
+    dhwLuxuryStartC: null,
+    dhwLuxuryStopC: null,
+    heatMediumPumpMode: null,
   },
 };
 

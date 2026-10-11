@@ -62,6 +62,39 @@ DEGREE_MINUTES_ENTITY = "number.degree_minutes_16_bit_43005"
 EFFEKTVAKT_MAX_POWER_ENTITY = "number.max_int_add_power_47212"
 EFFEKTVAKT_FUSE_ENTITY = "number.fuse_47214"
 
+# Added 2026-10-11 — "more data" pass on the "Nibe drift" tiles, at Håkan's
+# request ("rutorna behöver vara hälften så stora... all tillgänglig data").
+# These are every OTHER currently-live register found while surveying the
+# full F750 device (654 registered entities total) for anything worth
+# surfacing. Deliberately excludes the airflow/fan-speed/exhaust-air-temp
+# registers Håkan specifically asked about (EB100-BS1 Air flow 40050, Fan
+# speed current 43108, Airflow ref. 43124, BT20/BT21 exhaust/vented air
+# temp) -- those ARE registered in HA's entity registry (disabled_by: null)
+# but confirmed, even after a live nibe_heatpump config-entry reload
+# (2026-10-11), to have NO state object at all (plain 404, not
+# "unavailable") -- the pump itself has apparently never been configured to
+# transmit those specific coils over its Modbus connection. Same story as
+# this module's own "~650 disabled-by-default F750 registers" precedent
+# (2026-09-28) for the registers already below -- but this time enabling
+# the HA-side entity and reloading wasn't enough; the fix (if Håkan wants
+# it) is adding those coil addresses to the F750's own Modbus coil list via
+# its service menu (5.9.x) or the Modbus Manager/myUplink Pro tool, not
+# anything on this app's side. Revisit once that's done.
+COMPR_ENERGY_HW_LIFETIME_ENTITY = "sensor.compr_energy_hw_43305"
+COMPR_ENERGY_TOTAL_LIFETIME_ENTITY = "sensor.compr_energy_total_43144"
+EL_ADD_STATE_ENTITY = "sensor.int_el_add_state_43091"
+SMART_PRICE_ADAPTION_STATE_ENTITY = "sensor.state_smart_price_adaption_44908"
+SMART_PRICE_ADAPTION_HW_MODE_ENTITY = "sensor.smart_price_adaption_hw_comfort_mode_44897"
+HWC_PUMP_STATUS_ENTITY = "binary_sensor.hwc_pump_status_gp11_43180"
+SUPPLY_PUMP_STATE_ENTITY = "sensor.supply_pump_state_ep14_43431"
+SG_READY_HEATING_ENTITY = "switch.sg_ready_heating_48282"
+SG_READY_HOT_WATER_ENTITY = "switch.sg_ready_hot_water_48284"
+DHW_ECONOMY_START_ENTITY = "number.start_temperature_hw_economy_47045"
+DHW_ECONOMY_STOP_ENTITY = "number.stop_temperature_hw_economy_47049"
+DHW_LUXURY_START_ENTITY = "number.start_temperature_hw_luxury_47043"
+DHW_LUXURY_STOP_ENTITY = "number.stop_temperature_hw_luxury_47047"
+HEAT_MEDIUM_PUMP_MODE_ENTITY = "select.operational_mode_heat_medium_pump_47138"
+
 # Plain state (no attribute) reads. Climate/DHW are handled separately
 # below since the values this page wants live in their *attributes*, not
 # the bare `state` string (same split history.py makes).
@@ -79,10 +112,26 @@ _PLAIN_STATE_ENTITIES = [
     HEAT_OFFSET_ENTITY,
     EFFEKTVAKT_MAX_POWER_ENTITY,
     EFFEKTVAKT_FUSE_ENTITY,
+    COMPR_ENERGY_HW_LIFETIME_ENTITY,
+    COMPR_ENERGY_TOTAL_LIFETIME_ENTITY,
+    EL_ADD_STATE_ENTITY,
+    SMART_PRICE_ADAPTION_STATE_ENTITY,
+    SMART_PRICE_ADAPTION_HW_MODE_ENTITY,
+    HWC_PUMP_STATUS_ENTITY,
+    SUPPLY_PUMP_STATE_ENTITY,
+    SG_READY_HEATING_ENTITY,
+    SG_READY_HOT_WATER_ENTITY,
+    DHW_ECONOMY_START_ENTITY,
+    DHW_ECONOMY_STOP_ENTITY,
+    DHW_LUXURY_START_ENTITY,
+    DHW_LUXURY_STOP_ENTITY,
+    HEAT_MEDIUM_PUMP_MODE_ENTITY,
 ]
 
-# Numeric among the above — everything except Prio and Compressor State,
-# which are short text/enum values ("OFF"/"Hot Water"/..., "STOPPED"/...).
+# Numeric among the above — everything except Prio, Compressor State, and
+# the various text/enum/on-off registers (SG Ready switches, HWC pump
+# binary_sensor, supply pump ON/OFF text state, smart price adaption HW
+# mode text, heat medium pump mode select).
 _NUMERIC_ENTITIES = {
     COMPR_POWER_ENTITY,
     COMPR_POWER_MEAN_ENTITY,
@@ -95,6 +144,14 @@ _NUMERIC_ENTITIES = {
     HEAT_OFFSET_ENTITY,
     EFFEKTVAKT_MAX_POWER_ENTITY,
     EFFEKTVAKT_FUSE_ENTITY,
+    COMPR_ENERGY_HW_LIFETIME_ENTITY,
+    COMPR_ENERGY_TOTAL_LIFETIME_ENTITY,
+    EL_ADD_STATE_ENTITY,
+    SMART_PRICE_ADAPTION_STATE_ENTITY,
+    DHW_ECONOMY_START_ENTITY,
+    DHW_ECONOMY_STOP_ENTITY,
+    DHW_LUXURY_START_ENTITY,
+    DHW_LUXURY_STOP_ENTITY,
 }
 
 
@@ -165,6 +222,14 @@ def fetch_live_snapshot(base_url: str, headers: dict) -> dict:
             return None
         return _safe_float((data.get("attributes") or {}).get(attribute))
 
+    def bool_of(entity_id: str) -> bool | None:
+        """Like state_of, but for on/off binary_sensor/switch entities --
+        preserves None (entity unavailable) rather than collapsing an
+        unavailable register to a fabricated False, same "never a
+        fabricated value" convention state_of/attr_of already follow."""
+        raw = state_of(entity_id)
+        return None if raw is None else raw == "on"
+
     return {
         "prio": state_of(PRIO_ENTITY),
         "compressorPowerKw": state_of(COMPR_POWER_ENTITY),
@@ -179,6 +244,20 @@ def fetch_live_snapshot(base_url: str, headers: dict) -> dict:
         "heatOffsetC": state_of(HEAT_OFFSET_ENTITY),
         "effektvaktMaxPowerKw": state_of(EFFEKTVAKT_MAX_POWER_ENTITY),
         "effektvaktFuseRatingA": state_of(EFFEKTVAKT_FUSE_ENTITY),
+        "compressorEnergyHwKwh": state_of(COMPR_ENERGY_HW_LIFETIME_ENTITY),
+        "compressorEnergyTotalKwh": state_of(COMPR_ENERGY_TOTAL_LIFETIME_ENTITY),
+        "electricAdditionStep": state_of(EL_ADD_STATE_ENTITY),
+        "smartPriceAdaptionState": state_of(SMART_PRICE_ADAPTION_STATE_ENTITY),
+        "smartPriceAdaptionHwMode": state_of(SMART_PRICE_ADAPTION_HW_MODE_ENTITY),
+        "hwcPumpOn": bool_of(HWC_PUMP_STATUS_ENTITY),
+        "supplyPumpState": state_of(SUPPLY_PUMP_STATE_ENTITY),
+        "sgReadyHeating": bool_of(SG_READY_HEATING_ENTITY),
+        "sgReadyHotWater": bool_of(SG_READY_HOT_WATER_ENTITY),
+        "dhwEconomyStartC": state_of(DHW_ECONOMY_START_ENTITY),
+        "dhwEconomyStopC": state_of(DHW_ECONOMY_STOP_ENTITY),
+        "dhwLuxuryStartC": state_of(DHW_LUXURY_START_ENTITY),
+        "dhwLuxuryStopC": state_of(DHW_LUXURY_STOP_ENTITY),
+        "heatMediumPumpMode": state_of(HEAT_MEDIUM_PUMP_MODE_ENTITY),
         "indoorActualC": attr_of(climate, "current_temperature"),
         "indoorTargetC": attr_of(climate, "temperature"),
         "dhwActualC": attr_of(dhw, "current_temperature"),

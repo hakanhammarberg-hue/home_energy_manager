@@ -44,6 +44,14 @@ function formatNumber(value: number | null, digits = 1): string {
   return value === null ? '—' : value.toFixed(digits);
 }
 
+function formatText(value: string | null): string {
+  return value === null || value === '' ? '—' : value;
+}
+
+function formatBool(value: boolean | null, onLabel = 'På', offLabel = 'Av'): string {
+  return value === null ? '—' : value ? onLabel : offLabel;
+}
+
 interface TileProps {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
@@ -52,6 +60,11 @@ interface TileProps {
   highlight?: 'yellow' | 'red';
 }
 
+// Compact tile (2026-10-11, at Håkan's request: "rutorna behöver vara
+// hälften så stora") -- roughly half the padding/text size of the original
+// Tile, and the grids below pack twice as many per row as a result. Kept
+// as the one Tile component (not a separate "CompactTile") since every
+// section on this page gets the same treatment, not just the new ones.
 function Tile({ icon: Icon, label, value, unit, highlight }: TileProps) {
   const highlightClasses =
     highlight === 'red'
@@ -61,18 +74,24 @@ function Tile({ icon: Icon, label, value, unit, highlight }: TileProps) {
         : 'border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800';
 
   return (
-    <div className={`border rounded-lg p-4 ${highlightClasses}`}>
-      <div className="flex items-center text-sm text-gray-500 dark:text-gray-400 mb-1">
-        <Icon className="h-4 w-4 mr-1.5" />
-        {label}
+    <div className={`border rounded-lg p-2 ${highlightClasses}`}>
+      <div className="flex items-center text-[11px] leading-tight text-gray-500 dark:text-gray-400 mb-0.5">
+        <Icon className="h-3 w-3 mr-1 flex-shrink-0" />
+        <span className="truncate">{label}</span>
       </div>
-      <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
         {value}
-        {unit && <span className="text-sm font-normal text-gray-500 dark:text-gray-400 ml-1">{unit}</span>}
+        {unit && <span className="text-xs font-normal text-gray-500 dark:text-gray-400 ml-1">{unit}</span>}
       </div>
     </div>
   );
 }
+
+// Shared grid classes for the compact tile sections below -- twice the
+// column count of the pre-2026-10-11 layout (grid-cols-2 sm:grid-cols-4),
+// matching the halved tile size so roughly the same number of rows fit
+// the same width while showing twice the data.
+const TILE_GRID = 'grid grid-cols-3 sm:grid-cols-6 gap-2';
 
 export default function NibeLiveCard() {
   const { enabled, heating, dhw, live, error, loading } = useNibeLive();
@@ -117,7 +136,7 @@ export default function NibeLiveCard() {
       </div>
 
       {/* Compressor detail */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className={TILE_GRID}>
         <Tile icon={Zap} label="Kompressor, ineffekt" value={formatNumber(live.compressorPowerKw, 2)} unit="kW" />
         <Tile icon={Zap} label="Kompressor, medeleffekt" value={formatNumber(live.compressorPowerMeanKw, 2)} unit="kW" />
         <Tile icon={Activity} label="Kompressorfrekvens" value={formatNumber(live.compressorFrequencyHz, 0)} unit="Hz" />
@@ -138,22 +157,64 @@ export default function NibeLiveCard() {
         />
         <Tile icon={Gauge} label="Laddpump GP1" value={formatNumber(live.chargePumpSpeedPct, 0)} unit="%" />
         <Tile icon={Gauge} label="Framledningspump" value={formatNumber(live.supplyPumpSpeedPct, 0)} unit="%" />
+        <Tile
+          icon={Zap}
+          label="Eltillsats, steg"
+          value={formatNumber(live.electricAdditionStep, 0)}
+          highlight={live.electricAdditionStep !== null && live.electricAdditionStep > 0 ? 'yellow' : undefined}
+        />
       </div>
 
       {/* Temperatures + applied curve offset */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className={TILE_GRID}>
         <Tile icon={Thermometer} label="Rumstemp, verklig" value={formatNumber(live.indoorActualC)} unit="°C" />
         <Tile icon={Thermometer} label="Rumstemp, mål" value={formatNumber(live.indoorTargetC)} unit="°C" />
         <Tile icon={Droplet} label="Varmvatten, verklig" value={formatNumber(live.dhwActualC)} unit="°C" />
         <Tile icon={Gauge} label="Kurvoffset, tillämpad" value={formatNumber(live.heatOffsetC, 0)} unit="°C" />
       </div>
 
+      {/* Added 2026-10-11 — DHW comfort-mode thresholds read straight from
+          the pump's own registers (not settings this app writes) -- the
+          start/stop temps that drove the 2026-10-09 "stuck on Economy"
+          incident (see core/nibe/decision.py's decide_dhw_luxury). Shown
+          here so a future "why did it switch at X°C" question has an
+          immediate answer without reaching for Home Assistant directly. */}
+      <div className={TILE_GRID}>
+        <Tile icon={Droplet} label="VV Economy, start" value={formatNumber(live.dhwEconomyStartC, 0)} unit="°C" />
+        <Tile icon={Droplet} label="VV Economy, stopp" value={formatNumber(live.dhwEconomyStopC, 0)} unit="°C" />
+        <Tile icon={Droplet} label="VV Luxury, start" value={formatNumber(live.dhwLuxuryStartC, 0)} unit="°C" />
+        <Tile icon={Droplet} label="VV Luxury, stopp" value={formatNumber(live.dhwLuxuryStopC, 0)} unit="°C" />
+        <Tile icon={Gauge} label="HWC-pump GP11" value={formatBool(live.hwcPumpOn, 'Går', 'Stilla')} />
+        <Tile icon={Gauge} label="Framledningspump EP14" value={formatText(live.supplyPumpState)} />
+      </div>
+
+      {/* Added 2026-10-11 — lifetime compressor energy counters, and the
+          pump's own smart-price-adaption + SG Ready status flags (so the
+          page also shows what the F750 itself is already doing on price,
+          not only what this app's own levers are doing). */}
+      <div className={TILE_GRID}>
+        <Tile icon={Zap} label="Kompr. energi, totalt" value={formatNumber(live.compressorEnergyTotalKwh, 0)} unit="kWh" />
+        <Tile icon={Zap} label="Kompr. energi, VV" value={formatNumber(live.compressorEnergyHwKwh, 0)} unit="kWh" />
+        <Tile icon={Activity} label="Smart prisstyrning, läge" value={formatText(live.smartPriceAdaptionHwMode)} />
+        <Tile icon={Activity} label="Smart prisstyrning, status" value={formatNumber(live.smartPriceAdaptionState, 0)} />
+        <Tile icon={Gauge} label="SG Ready värme" value={formatBool(live.sgReadyHeating)} />
+        <Tile icon={Gauge} label="SG Ready VV" value={formatBool(live.sgReadyHotWater)} />
+      </div>
+      <p className="text-xs text-gray-400 dark:text-gray-500">
+        Lufthastighet/fläkthastighet och frånluftstemperatur finns registrerade i Home Assistant
+        men saknar helt livedata, även efter en omladdning av Nibe-integrationen (kontrollerat
+        2026-10-11) — pumpen själv verkar aldrig ha konfigurerats att sända just dessa Modbus-coils.
+        Går sannolikt att lägga till via pumpens egen servicemeny (5.9.x) eller Modbus Manager/
+        myUplink Pro; säg till om du vill att jag tittar närmare på exakt vilka coil-adresser som
+        behövs (kandidater: "EB100-BS1 Air flow", "Fan speed current", "Airflow ref.").
+      </p>
+
       {/* Added 2026-10-05 — effektvakt (power-guard) current setting, read
           straight from the pump. Both tiles show "—" whenever effektvakt
           has never been turned on at the pump's own panel — see
           useNibeLive's comment — which is the honest current state, not
           a loading/error condition. */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className={TILE_GRID}>
         <Tile icon={Zap} label="Effektvakt, max eltillsats" value={formatNumber(live.effektvaktMaxPowerKw, 2)} unit="kW" />
         <Tile icon={Gauge} label="Effektvakt, huvudsäkring" value={formatNumber(live.effektvaktFuseRatingA, 0)} unit="A" />
       </div>
