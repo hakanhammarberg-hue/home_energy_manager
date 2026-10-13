@@ -29,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from governor_api import router as governor_router
+from hardware_api import router as hardware_router
 from loguru import logger
 from nibe_api import router as nibe_router
 from perific_api import router as perific_router
@@ -263,6 +264,8 @@ app.include_router(diagnostics_router)
 # Fas 6: manual force-charge override + anti-dormancy wake-up pulses
 # (core.bess.battery_override / battery_override_api.py)
 app.include_router(battery_override_router)
+# Hardware Info page's own small router (core.hardware_info / hardware_api.py)
+app.include_router(hardware_router)
 
 
 class BESSController:

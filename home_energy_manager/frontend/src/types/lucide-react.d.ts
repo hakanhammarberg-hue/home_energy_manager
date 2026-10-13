@@ -45,4 +45,5 @@ declare module 'lucide-react' {
   export const Thermometer: FC<IconProps>;
   export const Droplet: FC<IconProps>;
   export const Gauge: FC<IconProps>;
+  export const BatteryCharging: FC<IconProps>;
 }
