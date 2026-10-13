@@ -589,6 +589,98 @@ async def patch_settings(updates: dict):
                         ),
                     )
 
+                # 2026-10-13 — Håkan's elpatron-safe DHW price lever (see
+                # core/nibe/decision.py's NINTH LEVER section). Bounds
+                # mirror cheap_price_percentile/expensive_price_percentile
+                # above; tank_floor_c/max_economy_s get their own checks
+                # since nothing else in this section validates a °C or a
+                # duration in seconds.
+                dhw_cheap = snake_data.get("dhw_price_control_cheap_percentile")
+                if dhw_cheap is not None and (
+                    not isinstance(dhw_cheap, (int, float))
+                    or isinstance(dhw_cheap, bool)
+                    or not (0 <= dhw_cheap <= 1)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "nibe.dhw_price_control_cheap_percentile must be "
+                            "between 0 and 1"
+                        ),
+                    )
+                dhw_expensive = snake_data.get("dhw_price_control_expensive_percentile")
+                if dhw_expensive is not None and (
+                    not isinstance(dhw_expensive, (int, float))
+                    or isinstance(dhw_expensive, bool)
+                    or not (0 <= dhw_expensive <= 1)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "nibe.dhw_price_control_expensive_percentile must "
+                            "be between 0 and 1"
+                        ),
+                    )
+                dhw_tank_floor = snake_data.get("dhw_tank_floor_c")
+                if dhw_tank_floor is not None and (
+                    not isinstance(dhw_tank_floor, (int, float))
+                    or isinstance(dhw_tank_floor, bool)
+                    or not (0 <= dhw_tank_floor <= 80)
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="nibe.dhw_tank_floor_c must be between 0 and 80",
+                    )
+                dhw_max_economy = snake_data.get("dhw_price_control_max_economy_s")
+                if dhw_max_economy is not None and (
+                    not isinstance(dhw_max_economy, (int, float))
+                    or isinstance(dhw_max_economy, bool)
+                    or dhw_max_economy <= 0
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "nibe.dhw_price_control_max_economy_s must be "
+                            "greater than zero"
+                        ),
+                    )
+
+                # Mutual exclusion (see core/nibe/decision.py's NINTH LEVER
+                # section): decide_dhw_luxury() and decide_dhw_price_control()
+                # both write select.hot_water_comfort_mode_47041, and Håkan
+                # was warned earlier the same conversation that two systems
+                # writing the same Modbus register is exactly how the
+                # BESS-Manager/H.E.M. VPP double-write incident happened —
+                # refuse to even persist a settings state where both DHW
+                # levers would run in the same cycle, rather than relying on
+                # app.py's own runtime precedence as the only safeguard.
+                # Checked against the EFFECTIVE value (this request's own
+                # new value if present, else whatever is already saved) so
+                # a partial PATCH that only touches one of the two flags
+                # still catches a conflict against the other's existing
+                # setting, not just a conflict within the same request.
+                current_nibe = bess_controller.settings_store.get_section("nibe")
+                effective_luxury = snake_data.get(
+                    "dhw_luxury_enabled",
+                    current_nibe.get("dhw_luxury_enabled", False),
+                )
+                effective_price_control = snake_data.get(
+                    "dhw_price_control_enabled",
+                    current_nibe.get("dhw_price_control_enabled", False),
+                )
+                if effective_luxury and effective_price_control:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "nibe.dhw_luxury_enabled and "
+                            "nibe.dhw_price_control_enabled cannot both be "
+                            "on — they write the same register "
+                            "(select.hot_water_comfort_mode_47041) and must "
+                            "stay mutually exclusive. Turn the other one off "
+                            "first."
+                        ),
+                    )
+
             if store_key == "ev_scheduler":
                 soc_cap = snake_data.get("soc_cap_percent")
                 if soc_cap is not None and (

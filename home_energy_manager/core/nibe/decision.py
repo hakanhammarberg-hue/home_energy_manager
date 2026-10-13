@@ -406,6 +406,88 @@ EIGHTH LEVER — INDOOR-TEMPERATURE CEILING, A SECOND GATE (Fas 4f, 2026-10-09)
     the same cycle, the indoor-temperature reason is reported — it's the
     more directly actionable one for whoever reads the dashboard status,
     and nothing is lost: both still correctly veto every boost branch.
+
+NINTH LEVER — DHW PRICE CONTROL, NEVER LUXURY (2026-10-13)
+    Håkan's own instruction, verbatim: "Bygg prisstyrning för varmvatten.
+    Dock aldrig mha elpatron." (Build price control for hot water. However,
+    never via the electric immersion/resistance heater.) decide_dhw_luxury()
+    above already does price-driven DHW control, but its reward state is
+    Luxury (58-64°C) — a band this module cannot prove never calls on the
+    pump's own electric backup element to reach, since nothing here reads
+    whether the compressor alone is actually hitting 64°C or the firmware is
+    quietly helping. That uncertainty is exactly what Håkan's "aldrig"
+    rules out, so this is a second, independent DHW lever — not a tweak to
+    decide_dhw_luxury() — whose reward state is Normal (48-52°C, the same
+    band the pump sits in every day regardless of any lever here) rather
+    than Luxury, with the structural guarantee that the string "luxury" (or
+    "LUXURY") never once appears as a comfort_mode this function can return.
+    That guarantee is enforced at the Python source level, the same place
+    the first version of this logic (a standalone Home Assistant automation,
+    built and verified live earlier the same day before Håkan asked for it
+    to move in here) enforced it via a hardcoded whitelist — moving house
+    doesn't loosen it.
+
+    MUTUALLY EXCLUSIVE WITH decide_dhw_luxury() — both write
+    select.hot_water_comfort_mode_47041, and Håkan was warned (same
+    conversation) that two systems writing the same Modbus register is
+    exactly the failure class already seen once between H.E.M. and BESS
+    Manager over the Growatt VPP registers. Rather than let that risk live
+    in this HA-based system too, the two DHW levers are nested behind
+    mutually exclusive settings flags (dhw_luxury_enabled,
+    dhw_price_control_enabled) and backend/app.py's _poll_nibe only ever
+    calls ONE of decide_dhw_luxury()/decide_dhw_price_control() per cycle —
+    never both. backend/api.py's PATCH /api/settings validation additionally
+    refuses to persist a state where both are true at once, so the
+    conflicting configuration can't even be saved, let alone run.
+
+    PRICE SHAPE — percentile bands, not a single threshold. Cheap (at/below
+    cheap_price_percentile of today's known prices) resolves to Normal —
+    refill the tank while it's cheap. Expensive (at/above
+    expensive_price_percentile) resolves to Economy — let it coast down
+    rather than pay peak price to keep it topped up. Anything in between
+    (the deadband) holds at whatever the register currently reads if that's
+    Economy or Normal, or defaults to Normal otherwise (including on first
+    activation, or if the live read comes back as Luxury/Smart Control —
+    this lever actively steers away from those two the first chance it
+    gets, it doesn't just leave them alone the way decide_dhw_luxury() does
+    for a stray manual choice). Missing price data holds the same way —
+    same "burden of proof on the exception" convention as every lever in
+    this module: no evidence conditions have changed is not a reason to
+    force a write either way.
+
+    Two safety floors, checked BEFORE the price bands, exactly mirroring
+    the FOURTH LEVER's degree-minutes gate in shape (a gate that can only
+    force Normal, never cause Economy):
+      - dhw_tank_floor_c: if the tank's own measured temperature
+        (water_heater.f750_hot_water's current_temperature, read live by
+        the caller — this module does no HA I/O itself) is below the floor,
+        force Normal regardless of price. Unlike degree_minutes_floor's
+        -400.0 guess, DEFAULT_DHW_TANK_FLOOR_C (42.0°C) is read directly off
+        the pump's own confirmed ECONOMY band (40-45°C, see project status
+        doc) — a real, observed value, not a guess, chosen as "comfortably
+        inside Economy's own band, never achievable while genuinely cold."
+      - dhw_price_control_max_economy_s: if the register has read Economy
+        continuously for this long, force Normal regardless of price or
+        tank temperature — the same shape as decide_dhw_luxury()'s own
+        legionella/disinfection guard (SEVENTH section above) but a much
+        shorter window (DEFAULT_DHW_PRICE_CONTROL_MAX_ECONOMY_S, 20 hours,
+        vs. that guard's 3 days) and a different motivation: this lever's
+        cheap/expensive bands can in principle leave Economy engaged for a
+        long contiguous stretch if prices stay unfavourable, and 20h is a
+        deliberately tighter leash on that than the legionella guard's
+        already-conservative 3-day ceiling, chosen specifically for this
+        lever rather than reusing that constant.
+    Missing tank_temp_c or seconds_since_last_non_economy does not trigger
+    either floor — same burden-of-proof convention as everywhere else.
+
+    DISABLED BEHAVIOUR — enabled=False is a pure no-op (comfort_mode=None,
+    don't touch the register) UNLESS the register is found reading Economy,
+    this lever's only possible residue (it can also return Normal, but
+    Normal needs no cleanup — it's already the safe default everything
+    else in this package resets to). Exactly one reset status
+    (disabled_reset_from_economy) rather than decide_dhw_luxury()'s two,
+    because Luxury is never a value this lever can have written in the
+    first place.
 """
 
 from dataclasses import dataclass
@@ -505,6 +587,32 @@ DEFAULT_MAX_CONTINUOUS_ECONOMY_S = 259200.0
 # normal, brief overshoot doesn't fight the boost lever, but low enough to
 # actually have stopped the 24.7°C stretch this lever was added because of.
 DEFAULT_MAX_INDOOR_TEMP_C = 22.5
+
+# 2026-10-13 — see module docstring's NINTH LEVER section. Cheap/expensive
+# bands for the elpatron-safe DHW price lever — 35/65 rather than
+# DEFAULT_CHEAP_PRICE_PERCENTILE's single 50th-percentile split, so there's
+# a genuine deadband in the middle of the day where the lever holds rather
+# than flipping on every price tick either side of a median. Matches the
+# values already verified live (via ha_eval_template) in this feature's
+# first iteration, built as a standalone Home Assistant automation earlier
+# the same day before Håkan asked for it to move into this package instead.
+DEFAULT_DHW_PRICE_CONTROL_CHEAP_PERCENTILE = 0.35
+DEFAULT_DHW_PRICE_CONTROL_EXPENSIVE_PERCENTILE = 0.65
+
+# 2026-10-13 — a real, observed value (the pump's own confirmed ECONOMY
+# band is 40-45°C, see project status doc), not a guess like
+# DEFAULT_DEGREE_MINUTES_FLOOR: 42°C sits comfortably inside that band,
+# low enough that the tank is genuinely running low on hot water, not just
+# resting at Economy's own normal operating point.
+DEFAULT_DHW_TANK_FLOOR_C = 42.0
+
+# 2026-10-13 — a much shorter leash than decide_dhw_luxury()'s own
+# DEFAULT_MAX_CONTINUOUS_ECONOMY_S (3 days): this lever's cheap/expensive
+# bands, not a single reactive exception, can in principle hold Economy
+# for a long contiguous stretch whenever prices stay unfavourable, so 20
+# hours is a deliberately tighter, lever-specific ceiling rather than
+# reusing that constant.
+DEFAULT_DHW_PRICE_CONTROL_MAX_ECONOMY_S = 72000.0
 
 
 @dataclass(frozen=True)
@@ -1064,6 +1172,164 @@ def _apply_legionella_guard(
             "at least one cycle as a defense-in-depth legionella/"
             "disinfection safeguard, overriding both the cost-driven "
             f"Economy default ({natural.status}) and governor headroom"
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class DhwPriceControlDecision:
+    """Whether DHW should be in Economy or Normal comfort mode this cycle —
+    see module docstring's NINTH LEVER section. Never Luxury: that string
+    does not appear anywhere in this function's possible return values,
+    which is the structural half of Håkan's "aldrig mha elpatron" ask (the
+    other half is decide_dhw_luxury()/this function never being called in
+    the same cycle — enforced by the caller, see that section).
+
+    status: "disabled" | "disabled_reset_from_economy" |
+        "forced_normal_tank_floor" | "forced_normal_max_economy_duration" |
+        "normal_cheap_price" | "economy_expensive_price" |
+        "held_economy_deadband" | "held_normal_deadband"
+    comfort_mode: "economy" | "normal" | None (None only for "disabled" —
+        the caller must leave the register untouched in that case, same
+        "off = don't even read" contract decide_dhw_luxury() uses).
+    """
+
+    status: str
+    comfort_mode: str | None
+    reason: str
+
+
+def decide_dhw_price_control(
+    *,
+    enabled: bool,
+    spot_price_ore_per_kwh: float | None,
+    today_prices_ore_per_kwh: list[float] | None,
+    tank_temp_c: float | None,
+    current_comfort_mode: str | None = None,
+    seconds_since_last_non_economy: float | None = None,
+    cheap_price_percentile: float = DEFAULT_DHW_PRICE_CONTROL_CHEAP_PERCENTILE,
+    expensive_price_percentile: float = DEFAULT_DHW_PRICE_CONTROL_EXPENSIVE_PERCENTILE,
+    tank_floor_c: float = DEFAULT_DHW_TANK_FLOOR_C,
+    max_continuous_economy_s: float = DEFAULT_DHW_PRICE_CONTROL_MAX_ECONOMY_S,
+) -> DhwPriceControlDecision:
+    """Pure decision for the elpatron-safe DHW price-control lever — see
+    module docstring's NINTH LEVER section for the full design and why this
+    exists alongside decide_dhw_luxury() rather than as a change to it.
+
+    `enabled` is nibe.dhw_price_control_enabled — when off, a deliberate
+    no-op (comfort_mode=None) UNLESS the register is found reading Economy,
+    this lever's only possible residue (see `current_comfort_mode` below);
+    a manual Normal/Smart Control/Luxury choice on the pump's own panel,
+    or a stray Luxury this lever could never itself have written, is left
+    completely untouched, mirroring decide_dhw_luxury()'s own "don't fight
+    the panel" contract.
+
+    `current_comfort_mode`: the register's raw, currently-read value,
+    case-insensitive, or None if unavailable. Consulted in two places: the
+    disabled-reset check just described, and — while enabled — as the
+    deadband's own hold-at-current fallback (see module docstring).
+
+    `tank_temp_c`: live water_heater.f750_hot_water current_temperature
+    reading, or None if unavailable. A gate, not an exception — checked
+    before either price band, so it can only force Normal, never cause
+    Economy. Does not block while enabled=False (see above).
+
+    `seconds_since_last_non_economy`: how long the register has read
+    Economy continuously, caller-tracked (mirrors decide_dhw_luxury()'s own
+    identically-named, identically-shaped parameter — and in
+    backend/app.py, literally the same clock, since the two levers are
+    mutually exclusive and only one is ever active at a time). None (no
+    proof of a long stretch) does not trigger the guard — same
+    burden-of-proof convention as everywhere else in this module.
+    """
+    if not enabled:
+        raw_mode = (current_comfort_mode or "").strip().upper()
+        if raw_mode == _RAW_COMFORT_MODE_ECONOMY:
+            return DhwPriceControlDecision(
+                status="disabled_reset_from_economy",
+                comfort_mode="normal",
+                reason=(
+                    "DHW price control is off, but the pump is still stuck "
+                    "on Economy from before it was switched off — resetting "
+                    "to Normal"
+                ),
+            )
+        return DhwPriceControlDecision(
+            status="disabled", comfort_mode=None, reason="DHW price control is off"
+        )
+
+    if tank_temp_c is not None and 0 < tank_temp_c < tank_floor_c:
+        return DhwPriceControlDecision(
+            status="forced_normal_tank_floor",
+            comfort_mode="normal",
+            reason=(
+                f"tank temperature {tank_temp_c:.1f}°C < floor "
+                f"{tank_floor_c:.1f}°C — forcing Normal regardless of price"
+            ),
+        )
+
+    if (
+        seconds_since_last_non_economy is not None
+        and seconds_since_last_non_economy >= max_continuous_economy_s
+    ):
+        return DhwPriceControlDecision(
+            status="forced_normal_max_economy_duration",
+            comfort_mode="normal",
+            reason=(
+                f"{seconds_since_last_non_economy:.0f}s continuously in "
+                f"Economy (>= {max_continuous_economy_s:.0f}s guard) — "
+                "forcing Normal for at least one cycle regardless of price"
+            ),
+        )
+
+    if spot_price_ore_per_kwh is not None and today_prices_ore_per_kwh:
+        cheap_threshold = _percentile(today_prices_ore_per_kwh, cheap_price_percentile)
+        if spot_price_ore_per_kwh <= cheap_threshold:
+            return DhwPriceControlDecision(
+                status="normal_cheap_price",
+                comfort_mode="normal",
+                reason=(
+                    f"price {spot_price_ore_per_kwh:.1f} öre <= "
+                    f"{cheap_threshold:.1f} öre (cheapest "
+                    f"{cheap_price_percentile:.0%} of today) — Normal hot water"
+                ),
+            )
+        expensive_threshold = _percentile(
+            today_prices_ore_per_kwh, expensive_price_percentile
+        )
+        if spot_price_ore_per_kwh >= expensive_threshold:
+            return DhwPriceControlDecision(
+                status="economy_expensive_price",
+                comfort_mode="economy",
+                reason=(
+                    f"price {spot_price_ore_per_kwh:.1f} öre >= "
+                    f"{expensive_threshold:.1f} öre (most expensive "
+                    f"{1 - expensive_price_percentile:.0%} of today) — "
+                    "Economy hot water"
+                ),
+            )
+
+    # Deadband, or price data missing — hold at whatever the register
+    # currently reads if it's one of this lever's own two valid targets;
+    # default to Normal otherwise (including on first activation, or if
+    # the live read is Luxury/Smart Control — this lever actively steers
+    # away from those, it doesn't just leave them alone).
+    raw_mode = (current_comfort_mode or "").strip().upper()
+    if raw_mode == _RAW_COMFORT_MODE_ECONOMY:
+        return DhwPriceControlDecision(
+            status="held_economy_deadband",
+            comfort_mode="economy",
+            reason=(
+                "price in the deadband (or unavailable) — holding at the "
+                "register's current Economy reading"
+            ),
+        )
+    return DhwPriceControlDecision(
+        status="held_normal_deadband",
+        comfort_mode="normal",
+        reason=(
+            "price in the deadband (or unavailable) — Normal (default, or "
+            "holding at the register's current Normal reading)"
         ),
     )
 

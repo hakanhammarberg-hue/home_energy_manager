@@ -122,6 +122,35 @@ const SettingsPage: React.FC = () => {
   const [savedNibeCheapPricePercentile, setSavedNibeCheapPricePercentile] = useState(0.5);
   const [nibeMinSolarSurplusKw, setNibeMinSolarSurplusKw] = useState(0.0);
   const [savedNibeMinSolarSurplusKw, setSavedNibeMinSolarSurplusKw] = useState(0.0);
+  // NINTH LEVER (2026-10-13): nibe.dhw_price_control_enabled — a second,
+  // independent DHW comfort-mode lever that structurally can never command
+  // Lyxläge ("aldrig mha elpatron"), built so Håkan can get price-aware
+  // varmvatten savings without the Lyxläge toggle's reward state. Mutually
+  // exclusive with nibeDhwLuxuryEnabled above — both write
+  // select.hot_water_comfort_mode_47041, so the backend (PATCH /api/settings)
+  // rejects turning both on at once; see core/nibe/decision.py's
+  // decide_dhw_price_control().
+  const [nibeDhwPriceControlEnabled, setNibeDhwPriceControlEnabled] = useState(false);
+  const [savedNibeDhwPriceControlEnabled, setSavedNibeDhwPriceControlEnabled] = useState(false);
+  const [nibeDhwPriceControlCheapPercentile, setNibeDhwPriceControlCheapPercentile] =
+    useState(0.35);
+  const [
+    savedNibeDhwPriceControlCheapPercentile,
+    setSavedNibeDhwPriceControlCheapPercentile,
+  ] = useState(0.35);
+  const [nibeDhwPriceControlExpensivePercentile, setNibeDhwPriceControlExpensivePercentile] =
+    useState(0.65);
+  const [
+    savedNibeDhwPriceControlExpensivePercentile,
+    setSavedNibeDhwPriceControlExpensivePercentile,
+  ] = useState(0.65);
+  const [nibeDhwTankFloorC, setNibeDhwTankFloorC] = useState(42.0);
+  const [savedNibeDhwTankFloorC, setSavedNibeDhwTankFloorC] = useState(42.0);
+  const [nibeDhwPriceControlMaxEconomyS, setNibeDhwPriceControlMaxEconomyS] = useState(72000.0);
+  const [
+    savedNibeDhwPriceControlMaxEconomyS,
+    setSavedNibeDhwPriceControlMaxEconomyS,
+  ] = useState(72000.0);
   // Added 2026-10-05, revised 2026-10-06 — effektvakt (power-guard) lever.
   // effektvaktGovernorEnabled is the master on/off switch, still False by
   // default. effektvaktBaselineKw/effektvaktFloorKw replace the old single
@@ -196,6 +225,11 @@ const SettingsPage: React.FC = () => {
       nibeDhwLuxuryEnabled !== savedNibeDhwLuxuryEnabled ||
       nibeCheapPricePercentile !== savedNibeCheapPricePercentile ||
       nibeMinSolarSurplusKw !== savedNibeMinSolarSurplusKw ||
+      nibeDhwPriceControlEnabled !== savedNibeDhwPriceControlEnabled ||
+      nibeDhwPriceControlCheapPercentile !== savedNibeDhwPriceControlCheapPercentile ||
+      nibeDhwPriceControlExpensivePercentile !== savedNibeDhwPriceControlExpensivePercentile ||
+      nibeDhwTankFloorC !== savedNibeDhwTankFloorC ||
+      nibeDhwPriceControlMaxEconomyS !== savedNibeDhwPriceControlMaxEconomyS ||
       effektvaktGovernorEnabled !== savedEffektvaktGovernorEnabled ||
       effektvaktBaselineKw !== savedEffektvaktBaselineKw ||
       effektvaktFloorKw !== savedEffektvaktFloorKw ||
@@ -363,6 +397,24 @@ const SettingsPage: React.FC = () => {
       setSavedNibeCheapPricePercentile(nibe.cheapPricePercentile ?? 0.5);
       setNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
       setSavedNibeMinSolarSurplusKw(nibe.minSolarSurplusKw ?? 0.0);
+      setNibeDhwPriceControlEnabled(nibe.dhwPriceControlEnabled ?? false);
+      setSavedNibeDhwPriceControlEnabled(nibe.dhwPriceControlEnabled ?? false);
+      setNibeDhwPriceControlCheapPercentile(nibe.dhwPriceControlCheapPercentile ?? 0.35);
+      setSavedNibeDhwPriceControlCheapPercentile(
+        nibe.dhwPriceControlCheapPercentile ?? 0.35,
+      );
+      setNibeDhwPriceControlExpensivePercentile(
+        nibe.dhwPriceControlExpensivePercentile ?? 0.65,
+      );
+      setSavedNibeDhwPriceControlExpensivePercentile(
+        nibe.dhwPriceControlExpensivePercentile ?? 0.65,
+      );
+      setNibeDhwTankFloorC(nibe.dhwTankFloorC ?? 42.0);
+      setSavedNibeDhwTankFloorC(nibe.dhwTankFloorC ?? 42.0);
+      setNibeDhwPriceControlMaxEconomyS(nibe.dhwPriceControlMaxEconomyS ?? 72000.0);
+      setSavedNibeDhwPriceControlMaxEconomyS(
+        nibe.dhwPriceControlMaxEconomyS ?? 72000.0,
+      );
       setEffektvaktGovernorEnabled(nibe.effektvaktGovernorEnabled ?? false);
       setSavedEffektvaktGovernorEnabled(nibe.effektvaktGovernorEnabled ?? false);
       setEffektvaktBaselineKw(nibe.effektvaktBaselineKw ?? 3.0);
@@ -692,6 +744,11 @@ const SettingsPage: React.FC = () => {
           dhwLuxuryEnabled: nibeDhwLuxuryEnabled,
           cheapPricePercentile: nibeCheapPricePercentile,
           minSolarSurplusKw: nibeMinSolarSurplusKw,
+          dhwPriceControlEnabled: nibeDhwPriceControlEnabled,
+          dhwPriceControlCheapPercentile: nibeDhwPriceControlCheapPercentile,
+          dhwPriceControlExpensivePercentile: nibeDhwPriceControlExpensivePercentile,
+          dhwTankFloorC: nibeDhwTankFloorC,
+          dhwPriceControlMaxEconomyS: nibeDhwPriceControlMaxEconomyS,
           effektvaktGovernorEnabled: effektvaktGovernorEnabled,
           effektvaktBaselineKw: effektvaktBaselineKw,
           effektvaktFloorKw: effektvaktFloorKw,
@@ -716,6 +773,11 @@ const SettingsPage: React.FC = () => {
       setSavedNibeDhwLuxuryEnabled(nibeDhwLuxuryEnabled);
       setSavedNibeCheapPricePercentile(nibeCheapPricePercentile);
       setSavedNibeMinSolarSurplusKw(nibeMinSolarSurplusKw);
+      setSavedNibeDhwPriceControlEnabled(nibeDhwPriceControlEnabled);
+      setSavedNibeDhwPriceControlCheapPercentile(nibeDhwPriceControlCheapPercentile);
+      setSavedNibeDhwPriceControlExpensivePercentile(nibeDhwPriceControlExpensivePercentile);
+      setSavedNibeDhwTankFloorC(nibeDhwTankFloorC);
+      setSavedNibeDhwPriceControlMaxEconomyS(nibeDhwPriceControlMaxEconomyS);
       setSavedEffektvaktGovernorEnabled(effektvaktGovernorEnabled);
       setSavedEffektvaktBaselineKw(effektvaktBaselineKw);
       setSavedEffektvaktFloorKw(effektvaktFloorKw);
@@ -1021,6 +1083,43 @@ const SettingsPage: React.FC = () => {
                   nibeMinSolarSurplusKw,
                   setNibeMinSolarSurplusKw,
                   { min: 0, max: 20, step: 0.1, unit: 'kW' },
+                )}
+                {toggle(
+                  'Prisstyrning varmvatten (aldrig Lyxläge)',
+                  nibeDhwPriceControlEnabled,
+                  setNibeDhwPriceControlEnabled,
+                )}
+                {(nibeDhwPriceControlEnabled || nibeDhwLuxuryEnabled) && (
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    Ömsesidigt uteslutande med &quot;Lyxläge varmvatten&quot; ovan — båda
+                    styr samma reglage (varmvattnets komfortläge) och kan inte vara
+                    aktiva samtidigt. Den här bryts aldrig till Lyxläge/Smart Control,
+                    bara Normal/Ekonomi, så elpatronen kan aldrig startas av den.
+                  </p>
+                )}
+                {numField(
+                  'Billig el under',
+                  nibeDhwPriceControlCheapPercentile,
+                  setNibeDhwPriceControlCheapPercentile,
+                  { min: 0, max: 1, step: 0.05 },
+                )}
+                {numField(
+                  'Dyr el över',
+                  nibeDhwPriceControlExpensivePercentile,
+                  setNibeDhwPriceControlExpensivePercentile,
+                  { min: 0, max: 1, step: 0.05 },
+                )}
+                {numField(
+                  'Tankgolv (aldrig lägre, oavsett pris)',
+                  nibeDhwTankFloorC,
+                  setNibeDhwTankFloorC,
+                  { min: 30, max: 65, step: 0.5, unit: '°C' },
+                )}
+                {numField(
+                  'Max sammanhängande Ekonomi',
+                  nibeDhwPriceControlMaxEconomyS / 3600,
+                  (hours: number) => setNibeDhwPriceControlMaxEconomyS(hours * 3600),
+                  { min: 1, max: 48, step: 1, unit: 'h' },
                 )}
                 {toggle(
                   'Effektvakt-styrning (eltillsats)',

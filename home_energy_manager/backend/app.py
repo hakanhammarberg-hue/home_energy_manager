@@ -160,6 +160,16 @@ NIBE_DEGREE_MINUTES_ENTITY = "number.degree_minutes_16_bit_43005"
 # state — see _read_raw_entity_attribute() below.
 NIBE_INDOOR_TEMP_ENTITY = "climate.f750_climate_system_s1"
 
+# 2026-10-13 — DHW tank-temperature floor input for the elpatron-safe
+# price-control lever (see core/nibe/decision.py's NINTH LEVER section).
+# Same water_heater entity as core/nibe/history.py's own DHW_ENTITY
+# constant (a different read path — hourly chart history there, a live
+# raw-attribute poll here), kept as an independent copy for the same
+# reason NIBE_INDOOR_TEMP_ENTITY above is its own copy rather than an
+# import. An ATTRIBUTE read (current_temperature), not the entity's main
+# state — see _read_raw_entity_attribute() below.
+NIBE_DHW_TANK_TEMP_ENTITY = "water_heater.f750_hot_water"
+
 # Dashboard diagnostics addition (2026-09-03), same stopgap as the constants
 # above: read from a live 3-day check-in (see that day's conversation) that
 # the inverter's remote-control permission (select.*_vpp_remote_control)
@@ -376,7 +386,11 @@ class BESSController:
         self.nibe_heating_last_decision: nibe_decision.HeatingBoostDecision | None = (
             None
         )
-        self.nibe_dhw_last_decision: nibe_decision.DhwLuxuryDecision | None = None
+        self.nibe_dhw_last_decision: (
+            nibe_decision.DhwLuxuryDecision
+            | nibe_decision.DhwPriceControlDecision
+            | None
+        ) = None
 
         # Fas 4e (2026-09-26): state tracking for the anti-flap/hysteresis
         # lever (nibe_decision's SIXTH section) and the DHW legionella guard
@@ -1215,6 +1229,20 @@ class BESSController:
         except (TypeError, ValueError):
             indoor_temp_c = None
 
+        # NINTH LEVER (2026-10-13): DHW tank temperature — see
+        # nibe_decision's NINTH LEVER section (decide_dhw_price_control's
+        # tank floor). Same "always gathered, let the pure function decide"
+        # shape as indoor_temp_c above.
+        dhw_tank_temp_raw = self._read_raw_entity_attribute(
+            NIBE_DHW_TANK_TEMP_ENTITY, "current_temperature"
+        )
+        try:
+            dhw_tank_temp_c = (
+                None if dhw_tank_temp_raw is None else float(dhw_tank_temp_raw)
+            )
+        except (TypeError, ValueError):
+            dhw_tank_temp_c = None
+
         # Fas 4e (2026-09-26): anti-flap/hysteresis inputs — see
         # nibe_decision's SIXTH section. seconds_since_offset_last_changed
         # is computed from the *previous* tick's stored timestamp, before
@@ -1293,28 +1321,63 @@ class BESSController:
             else time.monotonic() - self.nibe_dhw_last_non_economy_monotonic
         )
 
-        dhw_decision = nibe_decision.decide_dhw_luxury(
-            enabled=nibe_settings.get("dhw_luxury_enabled", False),
-            spot_price_ore_per_kwh=spot_price_ore,
-            today_prices_ore_per_kwh=today_prices_ore,
-            solar_surplus_kw=solar_surplus_kw,
-            governor_enabled=governor_enabled,
-            current_kw=current_kw,
-            target_kw=target_kw,
-            cheap_price_percentile=cheap_price_percentile,
-            min_solar_surplus_kw=min_solar_surplus_kw,
-            seconds_since_last_non_economy=seconds_since_last_non_economy,
-            max_continuous_economy_s=nibe_settings.get(
-                "max_continuous_economy_s",
-                nibe_decision.DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
-            ),
-            # Bug found 2026-10-07: without this, switching the dashboard
-            # toggle off never undid a Luxury command this lever had
-            # already sent — the pump stayed stuck in Luxury indefinitely.
-            # A cheap extra GET (read-tier, always allowed) so
-            # decide_dhw_luxury can detect and self-heal exactly that case.
-            current_comfort_mode=self.nibe_controller.get_dhw_comfort_mode(),
-        )
+        # NINTH LEVER (2026-10-13): dhw_price_control and dhw_luxury both
+        # write select.hot_water_comfort_mode_47041 — they must never run in
+        # the same poll cycle (this is the "runtime" layer of the three-layer
+        # mutual-exclusion guarantee; the other two are the structural
+        # never-returns-luxury guarantee inside decide_dhw_price_control
+        # itself, and the settings-validation cross-field check in
+        # backend/api.py's PATCH /api/settings). Whichever lever is enabled
+        # is the only one invoked below; if dhw_price_control_enabled is
+        # False, behavior is byte-for-byte what it was before this lever
+        # existed.
+        if nibe_settings.get("dhw_price_control_enabled", False):
+            dhw_decision = nibe_decision.decide_dhw_price_control(
+                enabled=True,
+                spot_price_ore_per_kwh=spot_price_ore,
+                today_prices_ore_per_kwh=today_prices_ore,
+                tank_temp_c=dhw_tank_temp_c,
+                current_comfort_mode=self.nibe_controller.get_dhw_comfort_mode(),
+                seconds_since_last_non_economy=seconds_since_last_non_economy,
+                cheap_price_percentile=nibe_settings.get(
+                    "dhw_price_control_cheap_percentile",
+                    nibe_decision.DEFAULT_DHW_PRICE_CONTROL_CHEAP_PERCENTILE,
+                ),
+                expensive_price_percentile=nibe_settings.get(
+                    "dhw_price_control_expensive_percentile",
+                    nibe_decision.DEFAULT_DHW_PRICE_CONTROL_EXPENSIVE_PERCENTILE,
+                ),
+                tank_floor_c=nibe_settings.get(
+                    "dhw_tank_floor_c", nibe_decision.DEFAULT_DHW_TANK_FLOOR_C
+                ),
+                max_continuous_economy_s=nibe_settings.get(
+                    "dhw_price_control_max_economy_s",
+                    nibe_decision.DEFAULT_DHW_PRICE_CONTROL_MAX_ECONOMY_S,
+                ),
+            )
+        else:
+            dhw_decision = nibe_decision.decide_dhw_luxury(
+                enabled=nibe_settings.get("dhw_luxury_enabled", False),
+                spot_price_ore_per_kwh=spot_price_ore,
+                today_prices_ore_per_kwh=today_prices_ore,
+                solar_surplus_kw=solar_surplus_kw,
+                governor_enabled=governor_enabled,
+                current_kw=current_kw,
+                target_kw=target_kw,
+                cheap_price_percentile=cheap_price_percentile,
+                min_solar_surplus_kw=min_solar_surplus_kw,
+                seconds_since_last_non_economy=seconds_since_last_non_economy,
+                max_continuous_economy_s=nibe_settings.get(
+                    "max_continuous_economy_s",
+                    nibe_decision.DEFAULT_MAX_CONTINUOUS_ECONOMY_S,
+                ),
+                # Bug found 2026-10-07: without this, switching the dashboard
+                # toggle off never undid a Luxury command this lever had
+                # already sent — the pump stayed stuck in Luxury indefinitely.
+                # A cheap extra GET (read-tier, always allowed) so
+                # decide_dhw_luxury can detect and self-heal exactly that case.
+                current_comfort_mode=self.nibe_controller.get_dhw_comfort_mode(),
+            )
         self.nibe_dhw_last_decision = dhw_decision
         if dhw_decision.comfort_mode is None:
             # dhw_luxury_enabled is off — this add-on has no assurance about
@@ -1352,6 +1415,8 @@ class BESSController:
             "forced_normal_legionella_guard",
             "disabled_reset_from_luxury",
             "disabled_reset_from_economy",
+            "forced_normal_tank_floor",
+            "forced_normal_max_economy_duration",
         ):
             logger.warning("nibe dhw: %s", dhw_decision.reason)
         else:

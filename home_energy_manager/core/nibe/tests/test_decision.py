@@ -5,6 +5,8 @@ same way app.py's own `from core.governor import peak_governor` expects).
 
 from core.nibe.decision import (
     DEFAULT_DEGREE_MINUTES_FLOOR,
+    DEFAULT_DHW_PRICE_CONTROL_MAX_ECONOMY_S,
+    DEFAULT_DHW_TANK_FLOOR_C,
     DEFAULT_EXPENSIVE_PRICE_PERCENTILE,
     DEFAULT_HEAT_OFFSET_BOOST_C,
     DEFAULT_HEAT_OFFSET_REDUCTION_C,
@@ -15,6 +17,7 @@ from core.nibe.decision import (
     DEFAULT_UPGRADE_COOLDOWN_S,
     DEFAULT_WATCHDOG_TIMEOUT_S,
     decide_dhw_luxury,
+    decide_dhw_price_control,
     decide_heating_boost,
 )
 
@@ -27,6 +30,15 @@ KNOWN_PRICES_WITH_SPIKE = [20.0 + i * 5.0 for i in range(20)]  # 20.0..115.0
 SPIKE_THRESHOLD = sorted(KNOWN_PRICES_WITH_SPIKE)[
     round(DEFAULT_PRICE_SPIKE_PERCENTILE * (len(KNOWN_PRICES_WITH_SPIKE) - 1))
 ]
+
+# decide_dhw_price_control's own reference series — ten evenly-spaced
+# values so the default 35th/65th percentile thresholds (nearest-rank on
+# 10 sorted values: round(0.35*9)=3 -> 40.0, round(0.65*9)=6 -> 70.0) land
+# on round numbers that are easy to reason about in the tests below.
+DHW_PRICE_TODAY = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+DHW_PRICE_CHEAP_THRESHOLD = 40.0
+DHW_PRICE_EXPENSIVE_THRESHOLD = 70.0
+DHW_PRICE_DEADBAND_SPOT = 55.0  # strictly between the two thresholds above
 
 
 # ---------------------------------------------------------------------------
@@ -1136,3 +1148,285 @@ def test_legionella_guard_does_not_affect_a_luxury_outcome():
     )
     assert d.status == "luxury_cheap_price"
     assert d.comfort_mode == "luxury"
+
+
+# ---------------------------------------------------------------------------
+# decide_dhw_price_control (2026-10-13) — Håkan's "aldrig mha elpatron" DHW
+# lever. Mirrors decide_dhw_luxury()'s own test shape above, plus a
+# dedicated structural check that "luxury" never once comes out of it.
+# ---------------------------------------------------------------------------
+
+
+def test_dhw_price_control_disabled_is_a_pure_noop():
+    d = decide_dhw_price_control(
+        enabled=False,
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+    )
+    assert d.status == "disabled"
+    assert d.comfort_mode is None
+
+
+def test_dhw_price_control_disabled_is_a_noop_when_current_mode_is_normal():
+    d = decide_dhw_price_control(
+        enabled=False,
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+        current_comfort_mode="NORMAL",
+    )
+    assert d.status == "disabled"
+    assert d.comfort_mode is None
+
+
+def test_dhw_price_control_disabled_is_a_noop_when_current_mode_is_luxury():
+    # This lever can never itself have written Luxury, so — unlike
+    # decide_dhw_luxury()'s own reset logic — a stray Luxury found while
+    # disabled is left completely untouched, not reset.
+    d = decide_dhw_price_control(
+        enabled=False,
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+        current_comfort_mode="LUXURY",
+    )
+    assert d.status == "disabled"
+    assert d.comfort_mode is None
+
+
+def test_dhw_price_control_disabled_resets_a_stuck_economy_register_to_normal():
+    d = decide_dhw_price_control(
+        enabled=False,
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+        current_comfort_mode="ECONOMY",
+    )
+    assert d.status == "disabled_reset_from_economy"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_price_control_disabled_reset_check_is_case_insensitive():
+    d = decide_dhw_price_control(
+        enabled=False,
+        spot_price_ore_per_kwh=None,
+        today_prices_ore_per_kwh=None,
+        tank_temp_c=None,
+        current_comfort_mode="economy",
+    )
+    assert d.status == "disabled_reset_from_economy"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_price_control_disabled_is_a_noop_when_current_mode_unknown():
+    d = decide_dhw_price_control(
+        enabled=False,
+        spot_price_ore_per_kwh=None,
+        today_prices_ore_per_kwh=None,
+        tank_temp_c=None,
+        current_comfort_mode=None,
+    )
+    assert d.status == "disabled"
+    assert d.comfort_mode is None
+
+
+def test_dhw_price_control_normal_on_cheap_price():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=10.0,  # <= DHW_PRICE_CHEAP_THRESHOLD (40.0)
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+    )
+    assert d.status == "normal_cheap_price"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_price_control_economy_on_expensive_price():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=100.0,  # >= DHW_PRICE_EXPENSIVE_THRESHOLD (70.0)
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+    )
+    assert d.status == "economy_expensive_price"
+    assert d.comfort_mode == "economy"
+
+
+def test_dhw_price_control_holds_in_deadband_at_current_economy():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=DHW_PRICE_DEADBAND_SPOT,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+        current_comfort_mode="ECONOMY",
+    )
+    assert d.status == "held_economy_deadband"
+    assert d.comfort_mode == "economy"
+
+
+def test_dhw_price_control_holds_in_deadband_defaults_to_normal_when_current_unknown():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=DHW_PRICE_DEADBAND_SPOT,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+        current_comfort_mode=None,
+    )
+    assert d.status == "held_normal_deadband"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_price_control_deadband_steers_away_from_a_stray_luxury():
+    # Unlike the disabled case, an ENABLED lever actively steers away from
+    # Luxury/Smart Control the first chance it gets, rather than leaving
+    # them alone — see module docstring's NINTH LEVER section.
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=DHW_PRICE_DEADBAND_SPOT,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+        current_comfort_mode="LUXURY",
+    )
+    assert d.status == "held_normal_deadband"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_price_control_missing_price_data_holds_without_forcing():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=None,
+        today_prices_ore_per_kwh=None,
+        tank_temp_c=50.0,
+        current_comfort_mode="ECONOMY",
+    )
+    assert d.status == "held_economy_deadband"
+    assert d.comfort_mode == "economy"
+
+
+def test_dhw_price_control_tank_floor_forces_normal_regardless_of_price():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=100.0,  # would be Economy on price alone
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=DEFAULT_DHW_TANK_FLOOR_C - 1.0,
+    )
+    assert d.status == "forced_normal_tank_floor"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_price_control_tank_floor_at_exactly_the_floor_does_not_block():
+    # Strict "<", mirroring decide_heating_boost's own "<=" floor checks
+    # being exact-boundary-inclusive the other way — here, exactly at the
+    # floor is not yet "below" it.
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=100.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=DEFAULT_DHW_TANK_FLOOR_C,
+    )
+    assert d.status == "economy_expensive_price"
+    assert d.comfort_mode == "economy"
+
+
+def test_dhw_price_control_tank_floor_not_triggered_above_floor():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=DEFAULT_DHW_TANK_FLOOR_C + 1.0,
+    )
+    assert d.status == "normal_cheap_price"
+
+
+def test_dhw_price_control_tank_floor_missing_does_not_block():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=100.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=None,
+    )
+    assert d.status == "economy_expensive_price"
+
+
+def test_dhw_price_control_max_economy_duration_forces_normal():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=100.0,  # would be Economy on price alone
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+        seconds_since_last_non_economy=DEFAULT_DHW_PRICE_CONTROL_MAX_ECONOMY_S,
+    )
+    assert d.status == "forced_normal_max_economy_duration"
+    assert d.comfort_mode == "normal"
+
+
+def test_dhw_price_control_max_economy_duration_not_yet_triggered_under_limit():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=100.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+        seconds_since_last_non_economy=DEFAULT_DHW_PRICE_CONTROL_MAX_ECONOMY_S - 1,
+    )
+    assert d.status == "economy_expensive_price"
+
+
+def test_dhw_price_control_max_economy_duration_missing_does_not_trigger():
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=100.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=50.0,
+        seconds_since_last_non_economy=None,
+    )
+    assert d.status == "economy_expensive_price"
+
+
+def test_dhw_price_control_tank_floor_checked_before_price_bands():
+    # Even a genuinely cheap price must not stop the floor from forcing
+    # Normal — though cheap price would already resolve to Normal anyway,
+    # this nails down that the floor is a gate checked first, not an
+    # afterthought that only happens to agree here.
+    d = decide_dhw_price_control(
+        enabled=True,
+        spot_price_ore_per_kwh=10.0,
+        today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+        tank_temp_c=DEFAULT_DHW_TANK_FLOOR_C - 1.0,
+    )
+    assert d.status == "forced_normal_tank_floor"
+
+
+def test_dhw_price_control_never_returns_luxury():
+    """Structural safety check for Håkan's "aldrig mha elpatron" ask: scan
+    every status this function can produce, across the full range of
+    inputs exercised by the tests above, and confirm comfort_mode is never
+    "luxury" — the whole reason this is a separate lever from
+    decide_dhw_luxury() rather than a tweak to it."""
+    scenarios = [
+        dict(enabled=False, current_comfort_mode=None),
+        dict(enabled=False, current_comfort_mode="LUXURY"),
+        dict(enabled=False, current_comfort_mode="ECONOMY"),
+        dict(enabled=True, spot_price_ore_per_kwh=10.0, current_comfort_mode=None),
+        dict(enabled=True, spot_price_ore_per_kwh=100.0, current_comfort_mode=None),
+        dict(
+            enabled=True,
+            spot_price_ore_per_kwh=DHW_PRICE_DEADBAND_SPOT,
+            current_comfort_mode="LUXURY",
+        ),
+        dict(enabled=True, tank_temp_c=10.0, spot_price_ore_per_kwh=100.0),
+        dict(
+            enabled=True,
+            spot_price_ore_per_kwh=100.0,
+            seconds_since_last_non_economy=DEFAULT_DHW_PRICE_CONTROL_MAX_ECONOMY_S,
+        ),
+    ]
+    for scenario in scenarios:
+        d = decide_dhw_price_control(
+            today_prices_ore_per_kwh=DHW_PRICE_TODAY,
+            tank_temp_c=scenario.pop("tank_temp_c", 50.0),
+            spot_price_ore_per_kwh=scenario.pop("spot_price_ore_per_kwh", None),
+            **scenario,
+        )
+        assert d.comfort_mode != "luxury"
+        assert d.comfort_mode in (None, "economy", "normal")

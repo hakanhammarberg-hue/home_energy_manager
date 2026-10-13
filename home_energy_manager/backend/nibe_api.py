@@ -76,6 +76,7 @@ def _status_payload(bess_controller: Any) -> dict:
     return {
         "enabled": settings.get("enabled", False),
         "dhwLuxuryEnabled": settings.get("dhw_luxury_enabled", False),
+        "dhwPriceControlEnabled": settings.get("dhw_price_control_enabled", False),
         "heating": {
             "status": heating.status if heating is not None else None,
             "offsetC": heating.heat_offset_c if heating is not None else None,

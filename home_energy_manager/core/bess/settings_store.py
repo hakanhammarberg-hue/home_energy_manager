@@ -726,6 +726,22 @@ class SettingsStore:
                 "effektvakt_governor_enabled": False,
                 "effektvakt_baseline_kw": 3.0,
                 "effektvakt_floor_kw": 1.0,
+                # 2026-10-13 — Håkan's "Bygg prisstyrning för varmvatten.
+                # Dock aldrig mha elpatron." A second, independent DHW
+                # lever alongside dhw_luxury_enabled above — see
+                # core/nibe/decision.py's NINTH LEVER section for why this
+                # is a separate flag/function rather than a change to the
+                # existing Luxury lever, and why the two are mutually
+                # exclusive (backend/api.py's PATCH validation refuses to
+                # persist both true at once; backend/app.py's _poll_nibe
+                # only ever calls one of the two decide_dhw_* functions per
+                # cycle). Off by default — installing this code changes
+                # nothing until explicitly turned on in Settings.
+                "dhw_price_control_enabled": False,
+                "dhw_price_control_cheap_percentile": 0.35,
+                "dhw_price_control_expensive_percentile": 0.65,
+                "dhw_tank_floor_c": 42.0,
+                "dhw_price_control_max_economy_s": 72000.0,
             },
         }
 
@@ -1082,6 +1098,17 @@ class SettingsStore:
                 "effektvakt_governor_enabled": False,
                 "effektvakt_baseline_kw": 3.0,
                 "effektvakt_floor_kw": 1.0,
+                # 2026-10-13 — see this section's top-level default dict
+                # above for the full story. Off/inert on backfill, same
+                # no-behavior-change convention as effektvakt_* above —
+                # dhw_price_control_enabled stays False, so an existing
+                # install's dhw_luxury_enabled (if already on) keeps
+                # working exactly as before.
+                "dhw_price_control_enabled": False,
+                "dhw_price_control_cheap_percentile": 0.35,
+                "dhw_price_control_expensive_percentile": 0.65,
+                "dhw_tank_floor_c": 42.0,
+                "dhw_price_control_max_economy_s": 72000.0,
             }
             for key, default_value in nibe_defaults.items():
                 if key not in nibe_section:

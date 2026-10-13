@@ -30,11 +30,22 @@ export type HeatingStatus =
 export type DhwStatus =
   | 'disabled'
   | 'disabled_reset_from_luxury'
+  | 'disabled_reset_from_economy'
   | 'no_headroom'
   | 'luxury_cheap_price'
   | 'luxury_solar_surplus'
   | 'economy_no_condition'
-  | 'forced_normal_legionella_guard';
+  | 'forced_normal_legionella_guard'
+  // nibe.dhw_price_control_enabled lever (2026-10-13) — see
+  // decide_dhw_price_control() in core/nibe/decision.py. Mutually exclusive
+  // with the Lyxläge (dhw_luxury_enabled) statuses above; never engages
+  // "luxury" by construction.
+  | 'forced_normal_tank_floor'
+  | 'forced_normal_max_economy_duration'
+  | 'normal_cheap_price'
+  | 'economy_expensive_price'
+  | 'held_economy_deadband'
+  | 'held_normal_deadband';
 
 export type StatusColor = 'blue' | 'green' | 'yellow' | 'red' | 'purple';
 
@@ -69,21 +80,35 @@ export const HEATING_STATUS_COLORS: Record<HeatingStatus, StatusColor> = {
 export const DHW_STATUS_LABELS: Record<DhwStatus, string> = {
   disabled: 'Av',
   disabled_reset_from_luxury: 'Av — återställde Lyxläge som fastnat till Normal',
+  disabled_reset_from_economy: 'Av — återställde Ekonomi som fastnat till Normal',
   no_headroom: 'Ekonomi — effektvakten saknar utrymme',
   luxury_cheap_price: 'Lyxläge — billig timme',
   luxury_solar_surplus: 'Lyxläge — solöverskott',
   economy_no_condition: 'Ekonomi',
   forced_normal_legionella_guard: 'Normal — legionellaskydd (Ekonomi för länge sammanhängande)',
+  forced_normal_tank_floor: 'Normal — tankgolv nått (aldrig elpatron)',
+  forced_normal_max_economy_duration: 'Normal — Ekonomi för länge sammanhängande',
+  normal_cheap_price: 'Normal — billig timme',
+  economy_expensive_price: 'Ekonomi — dyr timme',
+  held_economy_deadband: 'Ekonomi — behåller läge (mellanprisläge)',
+  held_normal_deadband: 'Normal — behåller läge (mellanprisläge)',
 };
 
 export const DHW_STATUS_COLORS: Record<DhwStatus, StatusColor> = {
   disabled: 'blue',
   disabled_reset_from_luxury: 'yellow',
+  disabled_reset_from_economy: 'yellow',
   no_headroom: 'yellow',
   luxury_cheap_price: 'green',
   luxury_solar_surplus: 'green',
   economy_no_condition: 'blue',
   forced_normal_legionella_guard: 'yellow',
+  forced_normal_tank_floor: 'yellow',
+  forced_normal_max_economy_duration: 'yellow',
+  normal_cheap_price: 'blue',
+  economy_expensive_price: 'green',
+  held_economy_deadband: 'blue',
+  held_normal_deadband: 'blue',
 };
 
 export function heatingStatusLabel(status: string | null): string {
